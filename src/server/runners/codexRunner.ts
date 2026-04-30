@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs";
 import type { StartTaskInput, Task } from "../../shared/types";
 import type { TaskStore } from "../store";
+import { completeWithoutHumanReview } from "../taskCompletion";
 import { nowIso } from "../time";
 import { AppServerProtocolClient, type AppServerProtocolMessage, type JsonRecord } from "./appServerProtocol";
 import { prepareTaskWorkspace } from "./workspace";
@@ -46,6 +47,7 @@ export class CodexRunner {
     const task = this.store.getTask(taskId);
     if (!task) throw new Error("任务不存在");
 
+    this.store.markChecklistDone(taskId, (label) => label.includes("解析") || label.includes("需求"), "任务已解析并进入执行流程");
     this.store.setChecklistRunning(taskId, (label) => label.includes("仓库") || label.includes("工作区"), "正在准备任务工作区");
     let prepared: Awaited<ReturnType<typeof prepareTaskWorkspace>>;
     try {
@@ -308,9 +310,8 @@ export class CodexRunner {
     this.store.markChecklistDone(taskId, (label) => label.includes("整理") || label.includes("证据"), "执行输出已写入事件流");
     const latest = this.store.getTask(taskId);
     if (!latest) return;
-    const nextStatus = latest.humanReviewRequired ? "needs_review" : "completed";
     this.store.updateTask(taskId, {
-      status: nextStatus,
+      status: latest.humanReviewRequired ? "needs_review" : "completed",
       runPid: null,
       finishedAt: nowIso(),
       currentStep: latest.humanReviewRequired ? "等待人工复核" : "执行完成"
@@ -318,6 +319,9 @@ export class CodexRunner {
     if (latest.humanReviewRequired) {
       this.store.setChecklistRunning(taskId, (label) => label.includes("人工复核"), "等待你复核 Codex 最终回答和产物");
       this.store.addEvent(taskId, "review.requested", latest.humanReviewReason || "Codex 执行完成，等待人工复核");
+    } else {
+      const completed = this.store.getTask(taskId);
+      if (completed) completeWithoutHumanReview(this.store, completed);
     }
     this.store.addEvent(taskId, "runner.finished", "Codex app-server turn 已完成", payload);
   }

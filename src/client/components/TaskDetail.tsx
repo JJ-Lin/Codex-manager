@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Check, Circle, ExternalLink, FileText, Pause, Play, RotateCcw, ShieldCheck, SquareTerminal } from "lucide-react";
+import { Check, Circle, CircleMinus, ExternalLink, FileText, Pause, Play, RotateCw, ShieldCheck, SquareTerminal } from "lucide-react";
 import { checklistProgress } from "../../shared/status";
 import type { StartTaskInput, Task } from "../../shared/types";
 import { StatusBadge } from "./StatusBadge";
@@ -15,6 +15,7 @@ export function TaskDetail({ task, onStart, onStop, onReview }: Props) {
   const progress = checklistProgress(task.checklist);
   const rawEvents = task.events.filter((event) => event.kind === "runner.codex_event");
   const reviewArtifact = extractReviewArtifact(task);
+  const canStart = !["completed", "archived", "needs_review", "running", "syncing"].includes(task.status);
   const [reviewNote, setReviewNote] = useState("");
 
   useEffect(() => {
@@ -55,12 +56,12 @@ export function TaskDetail({ task, onStart, onStop, onReview }: Props) {
             <Pause size={16} />
             停止
           </button>
-        ) : task.status === "needs_review" ? null : (
+        ) : canStart ? (
           <button className="primary" type="button" onClick={() => onStart(task)}>
             <Play size={16} />
             {task.status === "draft" ? "开始执行" : "继续执行"}
           </button>
-        )}
+        ) : null}
         {task.status === "needs_review" ? (
           <>
             <button className="primary" type="button" onClick={() => onReview(task, "approve", reviewNote.trim() || undefined)}>
@@ -68,7 +69,7 @@ export function TaskDetail({ task, onStart, onStop, onReview }: Props) {
               复核通过并归档
             </button>
             <button className="secondary" type="button" onClick={requestChangesAndContinue}>
-              <RotateCcw size={16} />
+              <RotateCw size={16} />
               按意见继续执行
             </button>
             <button className="secondary" type="button" onClick={() => onReview(task, "block", reviewNote.trim() || undefined)}>
@@ -136,9 +137,9 @@ export function TaskDetail({ task, onStart, onStop, onReview }: Props) {
         <div className="checklist">
           {task.checklist.map((item) => (
             <div className={`check-item check-${item.status}`} key={item.id}>
-              {item.status === "done" ? <Check size={15} /> : <Circle size={15} />}
+              {checklistIcon(item.status)}
               <span>{item.label}</span>
-              <small>{item.status}</small>
+              <small>{checklistStatusLabel(item.status)}</small>
             </div>
           ))}
         </div>
@@ -199,6 +200,23 @@ function extractReviewArtifact(task: Task): ReviewArtifact | null {
     }
   }
   return null;
+}
+
+function checklistIcon(status: Task["checklist"][number]["status"]) {
+  if (status === "done") return <Check size={15} />;
+  if (status === "skipped") return <CircleMinus size={15} />;
+  return <Circle size={15} />;
+}
+
+function checklistStatusLabel(status: Task["checklist"][number]["status"]): string {
+  const labels: Record<Task["checklist"][number]["status"], string> = {
+    pending: "待处理",
+    running: "执行中",
+    done: "完成",
+    skipped: "不适用",
+    blocked: "阻塞"
+  };
+  return labels[status];
 }
 
 function outputTextFromRawItem(item: Record<string, unknown>): string | null {

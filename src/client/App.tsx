@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { AlertTriangle, Bot, GitPullRequest, LayoutDashboard, Plus, RefreshCw, Search, ShieldCheck } from "lucide-react";
+import { Bot, LayoutDashboard, Plus, RefreshCw, Search } from "lucide-react";
 import type { CreateTaskInput, Task, TaskState } from "../shared/types";
 import { sortTasksByOperatorPriority } from "../shared/status";
 import { api } from "./lib/api";
@@ -33,9 +33,10 @@ export default function App() {
   async function refresh(keepSelection = true) {
     const next = await api.state();
     setState(next);
-    if (!keepSelection || !selectedTaskId || !next.tasks.some((task) => task.id === selectedTaskId)) {
-      setSelectedTaskId(next.tasks[0]?.id);
-    }
+    setSelectedTaskId((current) => {
+      if (keepSelection && current && next.tasks.some((task) => task.id === current)) return current;
+      return next.tasks[0]?.id;
+    });
   }
 
   useEffect(() => {
@@ -140,12 +141,6 @@ export default function App() {
         </nav>
 
         <section className="task-column">
-          <div className="metric-strip">
-            <Metric icon={<GitPullRequest size={16} />} label="活跃任务" value={state?.metrics.running ?? 0} />
-            <Metric icon={<ShieldCheck size={16} />} label="人工复核" value={state?.metrics.needsReview ?? 0} />
-            <Metric icon={<AlertTriangle size={16} />} label="阻塞/失败" value={(state?.metrics.blocked ?? 0) + (state?.metrics.failed ?? 0)} />
-            <Metric icon={<RefreshCw size={16} />} label="同步漂移" value={state?.metrics.syncDrift ?? 0} />
-          </div>
           {error ? <div className="error-banner">{error}</div> : null}
           <TaskList tasks={tasks} selectedTaskId={selectedTask?.id} onSelect={(task) => setSelectedTaskId(task.id)} />
         </section>
@@ -170,16 +165,6 @@ export default function App() {
 const rootElement = document.getElementById("root");
 if (rootElement) {
   createRoot(rootElement).render(<App />);
-}
-
-function Metric({ icon, label, value }: { icon: React.ReactNode; label: string; value: number }) {
-  return (
-    <div className="metric">
-      {icon}
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
-  );
 }
 
 function countForFilter(state: TaskState | null, filter: Filter): number {

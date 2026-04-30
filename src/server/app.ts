@@ -9,6 +9,7 @@ import { detectGitIdentities } from "./integrations/gitIdentity";
 import { CodexRunner, defaultCodexModel } from "./runners/codexRunner";
 import { isLegacyManagedWorkspacePath } from "./runners/workspace";
 import { TaskStore } from "./store";
+import { approveAndArchiveTask, reconcileCompletedTaskChecklists } from "./taskCompletion";
 import { nowIso } from "./time";
 
 const createTaskSchema = z.object({
@@ -45,6 +46,7 @@ export function createApp() {
   const store = new TaskStore();
   store.recoverInterruptedRuns();
   recoverLegacyManagedWorkspaces(store);
+  reconcileCompletedTaskChecklists(store);
   const runner = new CodexRunner(store);
 
   app.use(express.json({ limit: "2mb" }));
@@ -153,9 +155,8 @@ export function createApp() {
       const task = store.getTask(req.params.taskId);
       if (!task) return res.status(404).json({ error: "任务不存在" });
       if (input.decision === "approve") {
-        store.markChecklistDone(task.id, (label) => label.includes("人工复核"), input.note || "人工复核已通过");
-        store.updateTask(task.id, { status: "completed", currentStep: "人工复核通过，任务完成", finishedAt: nowIso() });
-        store.addEvent(task.id, "review.approved", input.note || "人工复核已通过");
+        res.json(approveAndArchiveTask(store, task, input.note));
+        return;
       } else if (input.decision === "changes_requested") {
         if (runner.isRunning(task.id)) {
           runner.stop(task.id);

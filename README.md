@@ -93,10 +93,32 @@ The implementation follows Symphony's useful boundaries but changes the product 
 - `CodexRunner`: starts a Codex thread/turn, handles approval requests, and normalizes app-server events.
 - Review gate: extracts the final assistant message and local workspace artifacts from app-server events.
 - `WorkspaceManager`: per-task workspace resolution with an ASCII managed root, ready for remote worker support later.
-- React console: three-panel operator cockpit with review-first task ordering.
+- React console: three-panel operator cockpit with review-first task ordering. The left rail owns
+  status filtering, so the task list does not duplicate the same queue counters.
 
-Unlike the Symphony reference implementation, checklists, human review state, and Codex events are
-not only stored in an external tracker comment. They are first-class local records.
+## Symphony Alignment
+
+The original Symphony service is a long-running scheduler around Linear: it polls active tracker
+states, prepares a per-issue workspace, starts Codex app-server, and lets the agent move the tracker
+to workflow states such as `Human Review`, `Rework`, `Merging`, or `Done`. It intentionally keeps
+the rich business workflow in `WORKFLOW.md` and agent tools rather than in the orchestrator.
+
+Codex Manager keeps several differences intentionally:
+
+- Local-first task store: SQLite is the canonical local queue so you can create and review tasks
+  without Linear.
+- Browser review gate: final answers, local artifacts, checklist state, and review actions are
+  visible in one place instead of relying only on tracker comments.
+- GitHub/GitLab import boundary: external issues are mirrored into local tasks; full write-back is
+  kept behind the sync boundary.
+
+The parts that should remain aligned with Symphony are:
+
+- Codex execution uses app-server threads and turns, not shell-only black-box runs.
+- Continuations reuse the existing Codex thread and send only continuation guidance.
+- A successful Codex turn can stop at a handoff state such as human review, not only final done.
+- Completion semantics must distinguish "needs review", "local archive complete", and external
+  tracker sync.
 
 The app-server thread is persisted by Codex under `~/.codex/sessions/...` and its thread/turn ids are
 stored on the task. It does not open a new visible Codex Desktop chat window automatically; the

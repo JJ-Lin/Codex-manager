@@ -186,6 +186,12 @@ export class TaskStore {
     return this.updateChecklistItem(target.id, "done", evidence ?? target.evidence ?? null);
   }
 
+  markChecklistSkipped(taskId: string, labelMatcher: (label: string) => boolean, evidence?: string): ChecklistItem | null {
+    const target = this.listChecklist(taskId).find((item) => labelMatcher(item.label));
+    if (!target) return null;
+    return this.updateChecklistItem(target.id, "skipped", evidence ?? target.evidence ?? null);
+  }
+
   markChecklistBlocked(taskId: string, labelMatcher: (label: string) => boolean, evidence?: string): ChecklistItem | null {
     const target = this.listChecklist(taskId).find((item) => labelMatcher(item.label));
     if (!target) return null;
