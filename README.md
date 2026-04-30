@@ -13,7 +13,7 @@ review, where a task is in its checklist, and which Codex events were produced w
 - Import GitHub and GitLab issue URLs into local tasks.
 - Detect the local Git identities configured for GitHub and GitLab.
 - Track a structured checklist for each task.
-- Run `codex exec --json` in a per-task workspace.
+- Run `codex exec --json --model gpt-5.4` in a per-task workspace by default.
 - Persist Codex JSONL events so the run is inspectable after the process exits.
 - Promote completed runs into `需要人工复核` when human review is required.
 - Approve, request changes, block, stop, or continue tasks from the UI.
@@ -41,6 +41,19 @@ Persistent local state is stored under:
 
 ```text
 .codex-manager/
+```
+
+Managed task workspaces default to an ASCII path to avoid Codex websocket metadata issues when the
+project directory itself contains non-ASCII characters:
+
+```text
+~/.codex-manager/workspaces/
+```
+
+Override the workspace root or runner model with:
+
+```bash
+CODEX_MANAGER_WORKSPACE_ROOT=/tmp/codex-manager-workspaces CODEX_MANAGER_MODEL=gpt-5.4 npm start
 ```
 
 ## Production Build
@@ -76,8 +89,8 @@ The implementation follows Symphony's useful boundaries but changes the product 
 
 - `TaskStore`: persistent canonical tasks, checklist items, and event stream.
 - `TaskSourceAdapter`: GitHub/GitLab import and future bidirectional sync boundary.
-- `CodexRunner`: `codex exec --json` subprocess wrapper and event normalizer.
-- `WorkspaceManager`: per-task workspace resolution, ready for remote worker support later.
+- `CodexRunner`: `codex exec --json --model gpt-5.4` subprocess wrapper and event normalizer.
+- `WorkspaceManager`: per-task workspace resolution with an ASCII managed root, ready for remote worker support later.
 - React console: three-panel operator cockpit with review-first task ordering.
 
 Unlike the Symphony reference implementation, checklists, human review state, and Codex events are

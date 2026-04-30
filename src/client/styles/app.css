@@ -442,6 +442,13 @@ button {
   margin-bottom: 10px;
 }
 
+.section-hint {
+  margin-left: auto;
+  color: #61717d;
+  font-size: 12px;
+  font-weight: 500;
+}
+
 .current-step-box {
   display: grid;
   gap: 4px;

@@ -7,6 +7,7 @@ import type { TaskState } from "../shared/types";
 import { importExternalIssue } from "./integrations/taskSources";
 import { detectGitIdentities } from "./integrations/gitIdentity";
 import { CodexRunner } from "./runners/codexRunner";
+import { isLegacyManagedWorkspacePath } from "./runners/workspace";
 import { TaskStore } from "./store";
 import { nowIso } from "./time";
 
@@ -34,11 +35,6 @@ const importIssueSchema = z.object({
   provider: z.enum(["github", "gitlab"]).optional()
 });
 
-const checklistSchema = z.object({
-  status: z.enum(["pending", "running", "done", "skipped", "blocked"]),
-  evidence: z.string().nullable().optional()
-});
-
 const reviewSchema = z.object({
   decision: z.enum(["approve", "changes_requested", "block"]),
   note: z.string().optional()
@@ -48,6 +44,7 @@ export function createApp() {
   const app = express();
   const store = new TaskStore();
   store.recoverInterruptedRuns();
+  recoverLegacyManagedWorkspaces(store);
   const runner = new CodexRunner(store);
 
   app.use(express.json({ limit: "2mb" }));
@@ -129,15 +126,6 @@ export function createApp() {
     }
   });
 
-  app.patch("/api/checklist/:itemId", (req, res, next) => {
-    try {
-      const input = checklistSchema.parse(req.body);
-      res.json(store.updateChecklistItem(req.params.itemId, input.status, input.evidence));
-    } catch (error) {
-      next(error);
-    }
-  });
-
   app.post("/api/tasks/:taskId/review", (req, res, next) => {
     try {
       const input = reviewSchema.parse(req.body);
@@ -181,6 +169,19 @@ export function createApp() {
   });
 
   return app;
+}
+
+function recoverLegacyManagedWorkspaces(store: TaskStore): void {
+  for (const task of store.listTasks()) {
+    if (!task.workspacePath || !isLegacyManagedWorkspacePath(task.workspacePath)) continue;
+    store.updateTask(task.id, {
+      workspacePath: null,
+      currentStep: task.status === "failed" ? "旧版中文路径工作区已迁移，等待重试" : task.currentStep
+    });
+    store.addEvent(task.id, "runner.stopped", "已清理旧版 managed workspace 路径，下次执行会使用 ASCII 工作区", {
+      previousWorkspacePath: task.workspacePath
+    });
+  }
 }
 
 async function commandAvailable(command: string): Promise<boolean> {

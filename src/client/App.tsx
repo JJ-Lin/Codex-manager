@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { AlertTriangle, Bot, GitPullRequest, LayoutDashboard, Plus, RefreshCw, Search, ShieldCheck } from "lucide-react";
-import type { ChecklistItem, CreateTaskInput, Task, TaskState } from "../shared/types";
+import type { CreateTaskInput, Task, TaskState } from "../shared/types";
 import { sortTasksByOperatorPriority } from "../shared/status";
 import { api } from "./lib/api";
 import { NewTaskModal } from "./components/NewTaskModal";
@@ -155,7 +155,6 @@ export default function App() {
             task={selectedTask}
             onStart={(task) => runAction(() => api.startTask(task.id))}
             onStop={(task) => runAction(() => api.stopTask(task.id))}
-            onChecklist={(item: ChecklistItem) => runAction(() => api.updateChecklist(item.id, item.status === "done" ? "pending" : "done"))}
             onReview={(task: Task, decision) => runAction(() => api.review(task.id, decision))}
           />
         ) : (

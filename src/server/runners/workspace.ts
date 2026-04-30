@@ -1,20 +1,20 @@
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync } from "node:fs";
+import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { Task } from "../../shared/types";
 import { slugifyWorkspaceKey } from "../ids";
 
-const DEFAULT_WORKSPACE_ROOT = join(process.cwd(), ".codex-manager", "workspaces");
 const execFileAsync = promisify(execFile);
 
 export function resolveTaskWorkspace(task: Task): string {
-  if (task.workspacePath) {
+  if (task.workspacePath && !isLegacyManagedWorkspacePath(task.workspacePath)) {
     mkdirSync(task.workspacePath, { recursive: true });
     return resolve(task.workspacePath);
   }
   const key = slugifyWorkspaceKey(task.sourceRef?.url || task.title || task.id);
-  const path = join(DEFAULT_WORKSPACE_ROOT, `${key}-${task.id.slice(-6)}`);
+  const path = join(defaultWorkspaceRoot(), `${key}-${task.id.slice(-6)}`);
   mkdirSync(path, { recursive: true });
   return path;
 }
@@ -46,4 +46,12 @@ async function switchOrCreateBranch(path: string, branchName: string): Promise<v
   } catch {
     await execFileAsync("git", ["switch", "-c", branchName], { cwd: path, timeout: 30000 });
   }
+}
+
+function defaultWorkspaceRoot(): string {
+  return process.env.CODEX_MANAGER_WORKSPACE_ROOT || join(homedir(), ".codex-manager", "workspaces");
+}
+
+export function isLegacyManagedWorkspacePath(path: string): boolean {
+  return resolve(path).startsWith(resolve(join(process.cwd(), ".codex-manager", "workspaces")));
 }

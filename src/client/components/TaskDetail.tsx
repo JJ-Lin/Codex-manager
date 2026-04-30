@@ -1,17 +1,16 @@
 import { Check, Circle, ExternalLink, FileText, Pause, Play, RotateCcw, ShieldCheck, SquareTerminal } from "lucide-react";
 import { checklistProgress } from "../../shared/status";
-import type { ChecklistItem, Task } from "../../shared/types";
+import type { Task } from "../../shared/types";
 import { StatusBadge } from "./StatusBadge";
 
 interface Props {
   task: Task;
   onStart: (task: Task) => Promise<void>;
   onStop: (task: Task) => Promise<void>;
-  onChecklist: (item: ChecklistItem) => Promise<void>;
   onReview: (task: Task, decision: "approve" | "changes_requested" | "block") => Promise<void>;
 }
 
-export function TaskDetail({ task, onStart, onStop, onChecklist, onReview }: Props) {
+export function TaskDetail({ task, onStart, onStop, onReview }: Props) {
   const progress = checklistProgress(task.checklist);
   const rawEvents = task.events.filter((event) => event.kind === "runner.codex_event");
 
@@ -77,14 +76,15 @@ export function TaskDetail({ task, onStart, onStop, onChecklist, onReview }: Pro
         <div className="section-title">
           <Check size={16} />
           Checklist
+          <span className="section-hint">由执行器和复核流程更新</span>
         </div>
         <div className="checklist">
           {task.checklist.map((item) => (
-            <button className={`check-item check-${item.status}`} type="button" key={item.id} onClick={() => onChecklist(item)}>
+            <div className={`check-item check-${item.status}`} key={item.id}>
               {item.status === "done" ? <Check size={15} /> : <Circle size={15} />}
               <span>{item.label}</span>
               <small>{item.status}</small>
-            </button>
+            </div>
           ))}
         </div>
       </section>

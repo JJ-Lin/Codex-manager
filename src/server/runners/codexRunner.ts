@@ -53,13 +53,12 @@ export class CodexRunner {
       "--json",
       "-C",
       workspacePath,
+      "--model",
+      input.model?.trim() || process.env.CODEX_MANAGER_MODEL || "gpt-5.4",
       "--sandbox",
       input.sandbox ?? "workspace-write",
       "--skip-git-repo-check"
     ];
-    if (input.model?.trim()) {
-      args.push("--model", input.model.trim());
-    }
     args.push(prompt);
 
     this.store.setChecklistRunning(taskId, (label) => label.includes("启动") || label.includes("执行"), "Codex runner 已启动");
@@ -129,13 +128,15 @@ export class CodexRunner {
         }
         this.store.addEvent(taskId, "runner.finished", "Codex 执行完成", { code, signal });
       } else {
+        this.store.markChecklistBlocked(taskId, (label) => label.includes("启动") || label.includes("执行"), "Codex 进程非 0 退出");
+        const diagnosis = diagnoseFailure(this.store.listEvents(taskId, 80));
         this.store.updateTask(taskId, {
           status: "failed",
           runPid: null,
           finishedAt: nowIso(),
-          currentStep: `Codex 执行失败：${signal ?? code ?? "unknown"}`
+          currentStep: diagnosis || `Codex 执行失败：${signal ?? code ?? "unknown"}`
         });
-        this.store.addEvent(taskId, "runner.failed", "Codex 执行失败", { code, signal });
+        this.store.addEvent(taskId, "runner.failed", diagnosis || "Codex 执行失败", { code, signal });
       }
     });
 
@@ -241,4 +242,18 @@ function nestedString(record: Record<string, unknown>, objectKey: string, valueK
   if (!nested || typeof nested !== "object") return null;
   const value = (nested as Record<string, unknown>)[valueKey];
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function diagnoseFailure(events: Array<{ message: string }>): string | null {
+  const joined = events.map((event) => event.message).join("\n");
+  if (joined.includes("requires a newer version of Codex")) {
+    return "模型与当前 Codex CLI 不兼容";
+  }
+  if (joined.includes("UTF-8 encoding error") && joined.includes("x-codex-turn-metadata")) {
+    return "工作区路径包含非 ASCII 字符，Codex websocket metadata 失败";
+  }
+  if (joined.includes("Reading additional input from stdin")) {
+    return "Codex CLI 等待 stdin 输入";
+  }
+  return null;
 }

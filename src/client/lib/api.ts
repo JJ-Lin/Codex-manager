@@ -1,4 +1,4 @@
-import type { ChecklistItemStatus, CreateTaskInput, ExternalIssueInput, StartTaskInput, Task, TaskState } from "../../shared/types";
+import type { CreateTaskInput, ExternalIssueInput, StartTaskInput, Task, TaskState } from "../../shared/types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -22,8 +22,6 @@ export const api = {
   startTask: (taskId: string, input: StartTaskInput = {}) =>
     request<Task>(`/api/tasks/${taskId}/start`, { method: "POST", body: JSON.stringify(input) }),
   stopTask: (taskId: string) => request<Task>(`/api/tasks/${taskId}/stop`, { method: "POST", body: JSON.stringify({}) }),
-  updateChecklist: (itemId: string, status: ChecklistItemStatus, evidence?: string | null) =>
-    request(`/api/checklist/${itemId}`, { method: "PATCH", body: JSON.stringify({ status, evidence }) }),
   review: (taskId: string, decision: "approve" | "changes_requested" | "block", note?: string) =>
     request<Task>(`/api/tasks/${taskId}/review`, { method: "POST", body: JSON.stringify({ decision, note }) })
 };

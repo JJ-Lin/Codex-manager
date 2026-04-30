@@ -186,6 +186,12 @@ export class TaskStore {
     return this.updateChecklistItem(target.id, "done", evidence ?? target.evidence ?? null);
   }
 
+  markChecklistBlocked(taskId: string, labelMatcher: (label: string) => boolean, evidence?: string): ChecklistItem | null {
+    const target = this.listChecklist(taskId).find((item) => labelMatcher(item.label));
+    if (!target) return null;
+    return this.updateChecklistItem(target.id, "blocked", evidence ?? target.evidence ?? null);
+  }
+
   listEvents(taskId: string, limit = 200): TaskEvent[] {
     const rows = this.db
       .prepare("SELECT * FROM task_events WHERE task_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?")

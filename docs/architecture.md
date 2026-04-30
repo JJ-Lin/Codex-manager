@@ -16,7 +16,7 @@ The design directly addresses the black-box limitation of a pure Symphony-style 
 ## Core Model
 
 - `Task`: canonical local task across local, GitHub, and GitLab sources.
-- `ChecklistItem`: visible progress steps with operator-editable state.
+- `ChecklistItem`: visible progress steps updated by the runner and review flow.
 - `TaskEvent`: append-only task timeline for orchestration, Codex events, sync, and review.
 - `ExternalRef`: GitHub/GitLab binding for later bidirectional sync.
 - `GitIdentity`: detected commit identity and API capability for each provider.
@@ -41,7 +41,9 @@ stateDiagram-v2
 ## Important Extension Points
 
 - `TaskSourceAdapter`: add GitHub/GitLab/Linear bidirectional sync and webhooks.
-- `WorkspaceManager`: add SSH or remote GPU worker placement.
+- `WorkspaceManager`: add SSH or remote GPU worker placement. The local managed root defaults to
+  `~/.codex-manager/workspaces` to avoid non-ASCII path metadata failures in Codex websocket
+  headers.
 - `CodexRunner`: swap `codex exec --json` for app-server streaming when the protocol boundary is
   stable enough for richer intervention.
 - `TaskEvent`: add richer typed payloads for tool calls, command outputs, PR links, screenshots,

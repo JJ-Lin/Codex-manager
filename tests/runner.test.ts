@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -6,12 +6,18 @@ import { CodexRunner } from "../src/server/runners/codexRunner";
 import { TaskStore } from "../src/server/store";
 
 const oldCodexBin = process.env.CODEX_MANAGER_CODEX_BIN;
+const oldArgsFile = process.env.CODEX_MANAGER_TEST_ARGS_FILE;
 
 afterEach(() => {
   if (oldCodexBin === undefined) {
     delete process.env.CODEX_MANAGER_CODEX_BIN;
   } else {
     process.env.CODEX_MANAGER_CODEX_BIN = oldCodexBin;
+  }
+  if (oldArgsFile === undefined) {
+    delete process.env.CODEX_MANAGER_TEST_ARGS_FILE;
+  } else {
+    process.env.CODEX_MANAGER_TEST_ARGS_FILE = oldArgsFile;
   }
 });
 
@@ -23,13 +29,16 @@ describe("CodexRunner", () => {
       fakeCodex,
       [
         "#!/usr/bin/env bash",
+        "printf '%s\\n' \"$@\" > \"$CODEX_MANAGER_TEST_ARGS_FILE\"",
         "echo '{\"type\":\"session.started\",\"thread_id\":\"thread-1\",\"turn_id\":\"turn-1\"}'",
         "echo '{\"type\":\"tool_call.completed\",\"message\":\"ran tests\"}'",
         "exit 0"
       ].join("\n")
     );
     chmodSync(fakeCodex, 0o755);
+    const argsFile = join(dir, "args.txt");
     process.env.CODEX_MANAGER_CODEX_BIN = fakeCodex;
+    process.env.CODEX_MANAGER_TEST_ARGS_FILE = argsFile;
 
     const store = new TaskStore(join(dir, "test.sqlite"));
     const task = store.createTask({ title: "Runner test", humanReviewRequired: true });
@@ -42,6 +51,7 @@ describe("CodexRunner", () => {
     expect(finished.lastCodexSessionId).toBe("thread-1-turn-1");
     expect(finished.events.some((event) => event.kind === "runner.codex_event")).toBe(true);
     expect(finished.events.some((event) => event.kind === "review.requested")).toBe(true);
+    expect(readFileSync(argsFile, "utf8")).toContain("--model\ngpt-5.4");
   });
 });
 
