@@ -1,11 +1,11 @@
 import { useState } from "react";
 import { X } from "lucide-react";
-import type { CreateTaskInput } from "../../shared/types";
+import type { CreateTaskInput, ExternalIssueInput, OrchestrationMode } from "../../shared/types";
 
 interface Props {
   onClose: () => void;
   onCreate: (input: CreateTaskInput) => Promise<void>;
-  onImport: (url: string) => Promise<void>;
+  onImport: (input: ExternalIssueInput) => Promise<void>;
 }
 
 export function NewTaskModal({ onClose, onCreate, onImport }: Props) {
@@ -16,13 +16,14 @@ export function NewTaskModal({ onClose, onCreate, onImport }: Props) {
   const [workspacePath, setWorkspacePath] = useState("");
   const [checklistTemplate, setChecklistTemplate] = useState("");
   const [externalUrl, setExternalUrl] = useState("");
+  const [orchestrationMode, setOrchestrationMode] = useState<OrchestrationMode>("local_cockpit");
   const [busy, setBusy] = useState(false);
 
   async function submit() {
     setBusy(true);
     try {
       if (mode === "external") {
-        await onImport(externalUrl);
+        await onImport({ url: externalUrl, orchestrationMode, workflowProfile: profileForMode(orchestrationMode) });
       } else {
         await onCreate({
           title,
@@ -31,6 +32,8 @@ export function NewTaskModal({ onClose, onCreate, onImport }: Props) {
           workspacePath,
           checklistTemplate,
           providerAccount: "auto",
+          orchestrationMode,
+          workflowProfile: profileForMode(orchestrationMode),
           humanReviewRequired: true
         });
       }
@@ -58,6 +61,25 @@ export function NewTaskModal({ onClose, onCreate, onImport }: Props) {
           </button>
           <button className={mode === "external" ? "active" : ""} onClick={() => setMode("external")} type="button">
             GitHub / GitLab 同步
+          </button>
+        </div>
+
+        <div className="mode-picker">
+          <button
+            className={orchestrationMode === "local_cockpit" ? "active" : ""}
+            type="button"
+            onClick={() => setOrchestrationMode("local_cockpit")}
+          >
+            <strong>可视化驾驶舱</strong>
+            <span>展示步骤、事件、复核材料</span>
+          </button>
+          <button
+            className={orchestrationMode === "symphony_blackbox" ? "active" : ""}
+            type="button"
+            onClick={() => setOrchestrationMode("symphony_blackbox")}
+          >
+            <strong>Symphony 黑盒</strong>
+            <span>只看编排状态和交接点</span>
           </button>
         </div>
 
@@ -113,4 +135,8 @@ export function NewTaskModal({ onClose, onCreate, onImport }: Props) {
       </div>
     </div>
   );
+}
+
+function profileForMode(mode: OrchestrationMode): string {
+  return mode === "symphony_blackbox" ? "symphony-blackbox" : "local-cockpit";
 }

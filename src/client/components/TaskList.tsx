@@ -25,6 +25,7 @@ export function TaskList({ tasks, selectedTaskId, onSelect }: { tasks: Task[]; s
                 <StatusBadge status={task.status} />
                 <span>{task.currentStep ?? "等待更新"}</span>
                 <span>{progress.label} checks</span>
+                {task.orchestrationMode === "symphony_blackbox" ? <span>黑盒</span> : null}
               </div>
             </div>
             <div className="task-row-side">

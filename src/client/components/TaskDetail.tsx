@@ -1,7 +1,21 @@
 import { useEffect, useState } from "react";
-import { Check, Circle, CircleMinus, ExternalLink, FileText, Pause, Play, RotateCw, ShieldCheck, SquareTerminal } from "lucide-react";
+import {
+  Check,
+  Circle,
+  CircleMinus,
+  ExternalLink,
+  Eye,
+  FileText,
+  GitCompare,
+  Pause,
+  Play,
+  RotateCw,
+  ShieldCheck,
+  SquareTerminal
+} from "lucide-react";
 import { checklistProgress } from "../../shared/status";
-import type { StartTaskInput, Task } from "../../shared/types";
+import type { OrchestrationMode, StartTaskInput, Task, WorkspaceDiff } from "../../shared/types";
+import { api } from "../lib/api";
 import { StatusBadge } from "./StatusBadge";
 
 interface Props {
@@ -9,18 +23,36 @@ interface Props {
   onStart: (task: Task, input?: StartTaskInput) => Promise<void>;
   onStop: (task: Task) => Promise<void>;
   onReview: (task: Task, decision: "approve" | "changes_requested" | "block", note?: string) => Promise<void>;
+  onModeChange: (task: Task, mode: OrchestrationMode, workflowProfile?: string | null) => Promise<void>;
 }
 
-export function TaskDetail({ task, onStart, onStop, onReview }: Props) {
+export function TaskDetail({ task, onStart, onStop, onReview, onModeChange }: Props) {
   const progress = checklistProgress(task.checklist);
   const rawEvents = task.events.filter((event) => event.kind === "runner.codex_event");
   const reviewArtifact = extractReviewArtifact(task);
   const canStart = !["completed", "archived", "needs_review", "running", "syncing"].includes(task.status);
   const [reviewNote, setReviewNote] = useState("");
+  const [diff, setDiff] = useState<WorkspaceDiff | null>(null);
+  const isBlackbox = task.orchestrationMode === "symphony_blackbox";
 
   useEffect(() => {
     setReviewNote("");
   }, [task.id, task.status]);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .diff(task.id)
+      .then((value) => {
+        if (!cancelled) setDiff(value);
+      })
+      .catch(() => {
+        if (!cancelled) setDiff(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [task.id, task.status, task.updatedAt]);
 
   async function requestChangesAndContinue() {
     await onReview(task, "changes_requested", reviewNote.trim() || "需要继续处理复核意见");
@@ -34,6 +66,7 @@ export function TaskDetail({ task, onStart, onStop, onReview }: Props) {
           <div className="detail-status">
             <StatusBadge status={task.status} />
             {task.humanReviewRequired ? <span className="review-chip">Human Review</span> : null}
+            <span className={`mode-chip ${isBlackbox ? "blackbox" : "cockpit"}`}>{isBlackbox ? "Symphony 黑盒" : "可视化驾驶舱"}</span>
           </div>
           <h2>{task.title}</h2>
           <p>{task.description || "没有额外描述。"}</p>
@@ -78,9 +111,27 @@ export function TaskDetail({ task, onStart, onStop, onReview }: Props) {
             </button>
           </>
         ) : null}
+        <button
+          className="secondary"
+          type="button"
+          onClick={() =>
+            onModeChange(
+              task,
+              isBlackbox ? "local_cockpit" : "symphony_blackbox",
+              isBlackbox ? "local-cockpit" : "symphony-blackbox"
+            )
+          }
+        >
+          <Eye size={16} />
+          {isBlackbox ? "切回可视化" : "试用黑盒"}
+        </button>
       </div>
 
-      {task.status === "needs_review" ? (
+      {isBlackbox ? (
+        <BlackboxSummary task={task} progressLabel={progress.label} reviewArtifact={reviewArtifact} />
+      ) : null}
+
+      {task.status === "needs_review" && !isBlackbox ? (
         <section className="detail-section review-material">
           <div className="section-title">
             <ShieldCheck size={16} />
@@ -123,7 +174,7 @@ export function TaskDetail({ task, onStart, onStop, onReview }: Props) {
         <div className="current-step-box">
           <strong>{task.currentStep || "等待下一步"}</strong>
           <span>
-            Checklist {progress.label}，原始 Codex 事件 {rawEvents.length} 条。
+            {isBlackbox ? `Lifecycle ${progress.label}，内部事件已折叠。` : `Checklist ${progress.label}，原始 Codex 事件 ${rawEvents.length} 条。`}
           </span>
         </div>
       </section>
@@ -131,8 +182,8 @@ export function TaskDetail({ task, onStart, onStop, onReview }: Props) {
       <section className="detail-section">
         <div className="section-title">
           <Check size={16} />
-          Checklist
-          <span className="section-hint">由执行器和复核流程更新</span>
+          {isBlackbox ? "生命周期" : "Checklist"}
+          <span className="section-hint">{isBlackbox ? "只显示编排状态" : "由执行器和复核流程更新"}</span>
         </div>
         <div className="checklist">
           {task.checklist.map((item) => (
@@ -145,6 +196,15 @@ export function TaskDetail({ task, onStart, onStop, onReview }: Props) {
         </div>
       </section>
 
+      <section className="detail-section">
+        <div className="section-title">
+          <GitCompare size={16} />
+          工作区变更
+          <span className="section-hint">{diff?.isGitRepository ? "git diff" : "无 Git 工作区"}</span>
+        </div>
+        <WorkspaceDiffView diff={diff} />
+      </section>
+
       <section className="detail-section evidence-grid">
         <InfoRow label="工作区" value={task.workspacePath || "自动创建"} />
         <InfoRow label="仓库" value={task.repoUrl || "未绑定"} />
@@ -153,25 +213,27 @@ export function TaskDetail({ task, onStart, onStop, onReview }: Props) {
         {task.sourceRef?.url ? <InfoRow label="来源" value={task.sourceRef.url} href={task.sourceRef.url} /> : null}
       </section>
 
-      <section className="detail-section">
-        <div className="section-title">
-          <FileText size={16} />
-          执行事件
-        </div>
-        <div className="event-stream">
-          {task.events.length === 0 ? (
-            <div className="empty">还没有事件。</div>
-          ) : (
-            [...task.events].reverse().map((event) => (
-              <div className={`event event-${event.kind.replaceAll(".", "-")}`} key={event.id}>
-                <span>{new Date(event.createdAt).toLocaleTimeString()}</span>
-                <strong>{event.kind}</strong>
-                <p>{event.message}</p>
-              </div>
-            ))
-          )}
-        </div>
-      </section>
+      {!isBlackbox ? (
+        <section className="detail-section">
+          <div className="section-title">
+            <FileText size={16} />
+            执行事件
+          </div>
+          <div className="event-stream">
+            {task.events.length === 0 ? (
+              <div className="empty">还没有事件。</div>
+            ) : (
+              [...task.events].reverse().map((event) => (
+                <div className={`event event-${event.kind.replaceAll(".", "-")}`} key={event.id}>
+                  <span>{new Date(event.createdAt).toLocaleTimeString()}</span>
+                  <strong>{event.kind}</strong>
+                  <p>{event.message}</p>
+                </div>
+              ))
+            )}
+          </div>
+        </section>
+      ) : null}
     </aside>
   );
 }
@@ -179,6 +241,74 @@ export function TaskDetail({ task, onStart, onStop, onReview }: Props) {
 interface ReviewArtifact {
   text: string;
   files: Array<{ label: string; path: string }>;
+}
+
+function BlackboxSummary({
+  task,
+  progressLabel,
+  reviewArtifact
+}: {
+  task: Task;
+  progressLabel: string;
+  reviewArtifact: ReviewArtifact | null;
+}) {
+  const lastOrchestratorEvent = [...task.events]
+    .reverse()
+    .find((event) => ["runner.started", "runner.finished", "runner.failed", "sync.completed", "sync.failed", "review.requested"].includes(event.kind));
+  return (
+    <section className="detail-section blackbox-panel">
+      <div className="section-title">
+        <ShieldCheck size={16} />
+        Symphony 黑盒运行
+        <span className="section-hint">内部 Codex 事件已折叠</span>
+      </div>
+      <div className="blackbox-grid">
+        <div>
+          <span>Orchestrator</span>
+          <strong>{task.currentStep || "等待调度"}</strong>
+        </div>
+        <div>
+          <span>Progress</span>
+          <strong>{progressLabel}</strong>
+        </div>
+        <div>
+          <span>Handoff</span>
+          <strong>{task.status === "needs_review" ? "Human Review" : task.status}</strong>
+        </div>
+      </div>
+      {lastOrchestratorEvent ? (
+        <div className="blackbox-last-event">
+          <span>{lastOrchestratorEvent.kind}</span>
+          <p>{lastOrchestratorEvent.message}</p>
+        </div>
+      ) : null}
+      {task.status === "needs_review" && reviewArtifact ? (
+        <details className="blackbox-handoff" open>
+          <summary>交接材料</summary>
+          <pre>{reviewArtifact.text}</pre>
+        </details>
+      ) : null}
+    </section>
+  );
+}
+
+function WorkspaceDiffView({ diff }: { diff: WorkspaceDiff | null }) {
+  if (!diff) return <div className="empty">正在读取工作区变更。</div>;
+  if (!diff.workspacePath) return <div className="empty">任务还没有工作区。</div>;
+  if (!diff.isGitRepository) return <div className="empty">工作区不是 Git 仓库，无法生成 diff 摘要。</div>;
+  if (diff.status.length === 0 && !diff.stat) return <div className="empty">当前工作区没有未提交变更。</div>;
+  return (
+    <div className="diff-box">
+      {diff.status.length > 0 ? (
+        <div className="diff-files">
+          {diff.status.map((line) => (
+            <code key={line}>{line}</code>
+          ))}
+        </div>
+      ) : null}
+      {diff.stat ? <pre>{diff.stat}</pre> : null}
+    </div>
+  );
 }
 
 function extractReviewArtifact(task: Task): ReviewArtifact | null {

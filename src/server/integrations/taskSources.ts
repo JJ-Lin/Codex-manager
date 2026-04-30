@@ -9,13 +9,13 @@ export async function importExternalIssue(input: ExternalIssueInput): Promise<Cr
   const ref = parseExternalIssueUrl(input.url, input.provider);
   if (ref.provider === "github") {
     const enriched = await enrichGithubIssue(ref);
-    return issueToTaskInput(enriched);
+    return issueToTaskInput(enriched, input);
   }
   const enriched = await enrichGitlabIssue(ref);
-  return issueToTaskInput(enriched);
+  return issueToTaskInput(enriched, input);
 }
 
-function issueToTaskInput(ref: ExternalRef): CreateTaskInput & { sourceKind: "github" | "gitlab"; sourceRef: ExternalRef } {
+function issueToTaskInput(ref: ExternalRef, input: ExternalIssueInput): CreateTaskInput & { sourceKind: "github" | "gitlab"; sourceRef: ExternalRef } {
   const title = ref.title || `${ref.provider === "github" ? "GitHub" : "GitLab"} issue ${ref.number ?? ref.iid ?? ""}`.trim();
   const repoUrl =
     ref.provider === "github" && ref.owner && ref.repo
@@ -28,6 +28,8 @@ function issueToTaskInput(ref: ExternalRef): CreateTaskInput & { sourceKind: "gi
     description: ref.url ? `来源：${ref.url}` : "",
     repoUrl,
     providerAccount: ref.provider,
+    orchestrationMode: input.orchestrationMode,
+    workflowProfile: input.workflowProfile,
     sourceKind: ref.provider,
     sourceRef: ref,
     humanReviewRequired: true,

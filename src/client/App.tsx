@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Bot, LayoutDashboard, Plus, RefreshCw, Search } from "lucide-react";
-import type { CreateTaskInput, Task, TaskState } from "../shared/types";
+import { Bot, LayoutDashboard, Plus, RefreshCw, Search, Stethoscope } from "lucide-react";
+import type { CreateTaskInput, DoctorReport, ExternalIssueInput, Task, TaskState } from "../shared/types";
 import { sortTasksByOperatorPriority } from "../shared/status";
 import { api } from "./lib/api";
 import { NewTaskModal } from "./components/NewTaskModal";
@@ -27,6 +27,8 @@ export default function App() {
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
+  const [doctorOpen, setDoctorOpen] = useState(false);
+  const [doctor, setDoctor] = useState<DoctorReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -77,11 +79,18 @@ export default function App() {
     });
   }
 
-  async function importIssue(url: string) {
+  async function importIssue(input: ExternalIssueInput) {
     await runAction(async () => {
-      const task = await api.importIssue({ url });
+      const task = await api.importIssue(input);
       setSelectedTaskId(task.id);
       setModalOpen(false);
+    });
+  }
+
+  async function openDoctor() {
+    await runAction(async () => {
+      setDoctor(await api.doctor());
+      setDoctorOpen(true);
     });
   }
 
@@ -110,6 +119,10 @@ export default function App() {
         <button className="secondary" type="button" onClick={() => refresh(true)} disabled={busy}>
           <RefreshCw size={16} />
           刷新
+        </button>
+        <button className="secondary" type="button" onClick={openDoctor} disabled={busy}>
+          <Stethoscope size={16} />
+          Doctor
         </button>
         <button className="primary" type="button" onClick={() => setModalOpen(true)}>
           <Plus size={16} />
@@ -151,6 +164,7 @@ export default function App() {
             onStart={(task, input) => runAction(() => api.startTask(task.id, input))}
             onStop={(task) => runAction(() => api.stopTask(task.id))}
             onReview={(task: Task, decision, note) => runAction(() => api.review(task.id, decision, note))}
+            onModeChange={(task, mode, profile) => runAction(() => api.setMode(task.id, mode, profile))}
           />
         ) : (
           <aside className="detail-panel empty-detail">还没有任务。先创建一个本地任务或同步一个 GitHub/GitLab issue。</aside>
@@ -158,6 +172,7 @@ export default function App() {
       </main>
 
       {modalOpen ? <NewTaskModal onClose={() => setModalOpen(false)} onCreate={createTask} onImport={importIssue} /> : null}
+      {doctorOpen && doctor ? <DoctorModal report={doctor} onClose={() => setDoctorOpen(false)} /> : null}
     </div>
   );
 }
@@ -171,4 +186,31 @@ function countForFilter(state: TaskState | null, filter: Filter): number {
   if (!state) return 0;
   if (filter === "all") return state.metrics.total;
   return state.tasks.filter((task) => task.status === filter).length;
+}
+
+function DoctorModal({ report, onClose }: { report: DoctorReport; onClose: () => void }) {
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true">
+      <div className="modal doctor-modal">
+        <div className="modal-header">
+          <div>
+            <h2>运行环境 Doctor</h2>
+            <p>{new Date(report.generatedAt).toLocaleString()}</p>
+          </div>
+          <button className="secondary" type="button" onClick={onClose}>
+            关闭
+          </button>
+        </div>
+        <div className="doctor-list">
+          {report.checks.map((check) => (
+            <div className={`doctor-row doctor-${check.status}`} key={check.id}>
+              <strong>{check.label}</strong>
+              <span>{check.status}</span>
+              <p>{check.detail}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
 }

@@ -36,21 +36,25 @@ function markTerminalChecklist(
   task: Task,
   evidence: { reviewEvidence: string; archiveEvidence: string }
 ): void {
-  markDoneIfNeeded(store, task, (label) => label.includes("解析") || label.includes("需求"), "任务已解析并进入执行流程");
-  markDoneIfNeeded(store, task, (label) => label.includes("人工复核"), evidence.reviewEvidence);
+  markDoneIfNeeded(store, task, (label) => label.includes("解析") || label.includes("需求") || label.includes("领取"), "任务已解析并进入执行流程");
+  markDoneIfNeeded(store, task, (label) => label.includes("人工复核") || label.includes("Human Review") || label.includes("human"), evidence.reviewEvidence);
   markExternalSyncOutcome(store, task);
-  markDoneIfNeeded(store, task, (label) => label.includes("归档"), evidence.archiveEvidence);
+  markDoneIfNeeded(store, task, (label) => label.includes("归档") || label.includes("释放"), evidence.archiveEvidence);
   markResidualChecklistDone(store, task.id);
 }
 
 function markExternalSyncOutcome(store: TaskStore, task: Task): void {
-  if (!hasChecklistItem(task, (label) => label.includes("同步") && label.includes("外部"))) return;
+  if (!hasChecklistItem(task, isSyncChecklist)) return;
   if (task.sourceKind === "local" || !task.sourceRef?.url) {
-    markSkippedIfNeeded(store, task, (label) => label.includes("同步") && label.includes("外部"), "本地任务没有外部来源，无需同步");
+    markSkippedIfNeeded(store, task, isSyncChecklist, "本地任务没有外部来源，无需同步");
     return;
   }
-  markSkippedIfNeeded(store, task, (label) => label.includes("同步") && label.includes("外部"), "外部写回尚未启用，本地先归档并保留来源链接");
-  store.addEvent(task.id, "task.note", "外部写回尚未启用，本地归档已完成", task.sourceRef);
+  markSkippedIfNeeded(store, task, isSyncChecklist, "外部写回将由复核归档流程异步尝试");
+  store.addEvent(task.id, "task.note", "外部写回已排入复核归档流程", task.sourceRef);
+}
+
+function isSyncChecklist(label: string): boolean {
+  return label.includes("同步") || label.includes("tracker");
 }
 
 function markDoneIfNeeded(store: TaskStore, task: Task, matcher: (label: string) => boolean, evidence: string): void {

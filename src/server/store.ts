@@ -7,6 +7,7 @@ import type {
   CreateTaskInput,
   EventKind,
   ExternalRef,
+  OrchestrationMode,
   Task,
   TaskEvent,
   TaskStatus
@@ -14,6 +15,7 @@ import type {
 import { checklistFromTemplate } from "./checklist";
 import { id } from "./ids";
 import { nowIso } from "./time";
+import { loadWorkflow, profileForTask } from "./workflow";
 
 type SqlValue = string | number | null;
 type Row = Record<string, unknown>;
@@ -58,10 +60,22 @@ export class TaskStore {
   createTask(input: CreateTaskInput & { sourceKind?: "local" | "github" | "gitlab"; sourceRef?: ExternalRef | null }): Task {
     const taskId = id("task");
     const createdAt = nowIso();
-    const humanReviewRequired = input.humanReviewRequired ?? true;
+    const requestedHumanReviewRequired = input.humanReviewRequired ?? true;
     const status: TaskStatus = "draft";
     const sourceKind = input.sourceKind ?? "local";
     const currentStep = "等待启动";
+    const workflow = loadWorkflow();
+    const requestedProfile = input.workflowProfile ?? workflow.defaultProfile;
+    const fallbackMode = input.orchestrationMode ?? "local_cockpit";
+    const workflowProfile = workflow.profiles.find((profile) => profile.id === requestedProfile) ?? profileForTask(
+      { workflowProfile: null, orchestrationMode: fallbackMode },
+      workflow
+    );
+    const orchestrationMode = input.orchestrationMode ?? workflowProfile.orchestrationMode;
+    const profileId = workflowProfile.id;
+    const checklistTemplate = input.checklistTemplate ?? workflowProfile.checklist.join("\n");
+    const profileReviewRequired = workflowProfile.humanReviewRequired;
+    const humanReviewRequired = profileReviewRequired ?? requestedHumanReviewRequired;
 
     this.db.exec("BEGIN");
     try {
@@ -69,9 +83,9 @@ export class TaskStore {
         .prepare(
           `INSERT INTO tasks (
             id, title, description, status, priority, source_kind, source_ref_json, repo_url,
-            workspace_path, branch_name, provider_account, human_review_required,
-            human_review_reason, current_step, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            workspace_path, branch_name, provider_account, orchestration_mode, workflow_profile,
+            human_review_required, human_review_reason, current_step, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           taskId,
@@ -85,6 +99,8 @@ export class TaskStore {
           nullIfBlank(input.workspacePath),
           nullIfBlank(input.branchName),
           input.providerAccount ?? "auto",
+          orchestrationMode,
+          profileId,
           humanReviewRequired ? 1 : 0,
           input.humanReviewReason?.trim() || (humanReviewRequired ? "默认要求人工复核后再归档" : null),
           currentStep,
@@ -92,11 +108,17 @@ export class TaskStore {
           createdAt
         );
 
-      checklistFromTemplate(input.checklistTemplate).forEach((label, position) => {
+      checklistFromTemplate(checklistTemplate, orchestrationMode).forEach((label, position) => {
         this.insertChecklistItem(taskId, label, position, "pending", createdAt);
       });
 
-      this.insertEvent(taskId, "task.created", "任务已创建", { sourceKind, humanReviewRequired }, createdAt);
+      this.insertEvent(
+        taskId,
+        "task.created",
+        "任务已创建",
+        { sourceKind, humanReviewRequired, orchestrationMode, workflowProfile: profileId },
+        createdAt
+      );
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -124,6 +146,8 @@ export class TaskStore {
     if (fields.workspacePath !== undefined) push("workspace_path", fields.workspacePath ?? null);
     if (fields.branchName !== undefined) push("branch_name", fields.branchName ?? null);
     if (fields.providerAccount !== undefined) push("provider_account", fields.providerAccount ?? null);
+    if (fields.orchestrationMode !== undefined) push("orchestration_mode", fields.orchestrationMode);
+    if (fields.workflowProfile !== undefined) push("workflow_profile", fields.workflowProfile ?? null);
     if (fields.humanReviewRequired !== undefined) push("human_review_required", fields.humanReviewRequired ? 1 : 0);
     if (fields.humanReviewReason !== undefined) push("human_review_reason", fields.humanReviewReason ?? null);
     if (fields.currentStep !== undefined) push("current_step", fields.currentStep ?? null);
@@ -226,6 +250,8 @@ export class TaskStore {
       workspacePath: nullableString(row.workspace_path),
       branchName: nullableString(row.branch_name),
       providerAccount: (nullableString(row.provider_account) as Task["providerAccount"]) ?? "auto",
+      orchestrationMode: normalizeOrchestrationMode(row.orchestration_mode),
+      workflowProfile: nullableString(row.workflow_profile),
       humanReviewRequired: Number(row.human_review_required) === 1,
       humanReviewReason: nullableString(row.human_review_reason),
       currentStep: nullableString(row.current_step),
@@ -295,6 +321,8 @@ export class TaskStore {
         workspace_path TEXT,
         branch_name TEXT,
         provider_account TEXT,
+        orchestration_mode TEXT NOT NULL DEFAULT 'local_cockpit',
+        workflow_profile TEXT,
         human_review_required INTEGER NOT NULL DEFAULT 1,
         human_review_reason TEXT,
         current_step TEXT,
@@ -332,6 +360,14 @@ export class TaskStore {
       CREATE INDEX IF NOT EXISTS idx_events_task_created ON task_events(task_id, created_at);
       CREATE INDEX IF NOT EXISTS idx_checklist_task_position ON checklist_items(task_id, position);
     `);
+    this.ensureColumn("tasks", "orchestration_mode", "TEXT NOT NULL DEFAULT 'local_cockpit'");
+    this.ensureColumn("tasks", "workflow_profile", "TEXT");
+  }
+
+  private ensureColumn(table: string, column: string, definition: string): void {
+    const rows = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (rows.some((row) => row.name === column)) return;
+    this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 }
 
@@ -357,4 +393,8 @@ function parseJson(value: unknown): unknown {
   } catch {
     return null;
   }
+}
+
+function normalizeOrchestrationMode(value: unknown): OrchestrationMode {
+  return value === "symphony_blackbox" ? "symphony_blackbox" : "local_cockpit";
 }

@@ -10,6 +10,7 @@ function task(id: string, status: Task["status"], updatedAt: string): Task {
     status,
     priority: 3,
     sourceKind: "local",
+    orchestrationMode: "local_cockpit",
     humanReviewRequired: true,
     createdAt: updatedAt,
     updatedAt,

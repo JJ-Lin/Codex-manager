@@ -13,9 +13,12 @@ review, where a task is in its checklist, and which Codex events were produced w
 - Import GitHub and GitLab issue URLs into local tasks.
 - Detect the local Git identities configured for GitHub and GitLab.
 - Track a structured checklist for each task.
+- Choose between the visible local cockpit and a reversible Symphony-style blackbox view.
+- Load model, sandbox, max-turn, prompt, and checklist policy from `WORKFLOW.symphony.md`.
 - Run `codex app-server` in a per-task workspace and start a real Codex thread/turn.
 - Persist app-server thread, turn, item, approval, tool, and output events so the run is inspectable.
 - Promote completed runs into a visible review gate with the final answer and reviewable artifacts.
+- Show a per-task workspace diff summary and a runtime Doctor panel.
 - Approve, request changes, block, stop, or continue tasks from the UI.
 
 ## Run Locally
@@ -56,6 +59,19 @@ The default model is `gpt-5.5`. Override the workspace root or runner model with
 CODEX_MANAGER_WORKSPACE_ROOT=/tmp/codex-manager-workspaces CODEX_MANAGER_MODEL=gpt-5.4 npm start
 ```
 
+## Workflow Profiles
+
+`WORKFLOW.symphony.md` is the repo-owned workflow contract. It follows Symphony's YAML
+front-matter plus Markdown prompt pattern, and currently defines two profiles:
+
+- `local-cockpit`: the default operator cockpit with detailed checklist, event stream, review
+  material, and workspace diff.
+- `symphony-blackbox`: a closer Symphony daemon experience. It hides low-level Codex events in the
+  UI and surfaces only lifecycle state, Human Review handoff, tracker sync, and workspace proof.
+
+You can choose the profile when creating or importing a task. Existing tasks can be switched with
+the detail-panel button without changing the underlying event store.
+
 ## Production Build
 
 ```bash
@@ -82,6 +98,9 @@ Issue detail enrichment is best-effort:
 - GitHub issue import uses `gh issue view` when `gh` is installed and authenticated.
 - GitLab issue import uses `glab issue view` when `glab` is installed and authenticated.
 - If either CLI is missing, the issue URL is still imported as a local task with a source binding.
+- On approval, external writeback is intentionally non-destructive: Codex Manager comments on the
+  issue via `gh issue comment` or `glab issue note`. It does not close external issues yet; failed
+  writeback marks the task as `sync_drift`.
 
 ## Architecture
 
@@ -89,6 +108,8 @@ The implementation follows Symphony's useful boundaries but changes the product 
 
 - `TaskStore`: persistent canonical tasks, checklist items, and event stream.
 - `TaskSourceAdapter`: GitHub/GitLab import and future bidirectional sync boundary.
+- `WorkflowLoader`: `WORKFLOW.symphony.md` parsing, profile selection, and prompt rendering.
+- `ExternalSync`: non-destructive GitHub/GitLab writeback on review approval.
 - `AppServerProtocolClient`: newline-delimited JSON-RPC client for `codex app-server`.
 - `CodexRunner`: starts a Codex thread/turn, handles approval requests, and normalizes app-server events.
 - Review gate: extracts the final assistant message and local workspace artifacts from app-server events.

@@ -15,6 +15,8 @@ export type TaskSourceKind = "local" | "github" | "gitlab";
 
 export type Provider = "github" | "gitlab";
 
+export type OrchestrationMode = "local_cockpit" | "symphony_blackbox";
+
 export type ChecklistItemStatus = "pending" | "running" | "done" | "skipped" | "blocked";
 
 export type EventKind =
@@ -36,7 +38,10 @@ export type EventKind =
   | "sync.started"
   | "sync.completed"
   | "sync.failed"
-  | "identity.detected";
+  | "identity.detected"
+  | "workflow.loaded"
+  | "workflow.mode_changed"
+  | "diagnostic.checked";
 
 export interface ExternalRef {
   provider: Provider;
@@ -95,6 +100,8 @@ export interface Task {
   workspacePath?: string | null;
   branchName?: string | null;
   providerAccount?: Provider | "auto" | null;
+  orchestrationMode: OrchestrationMode;
+  workflowProfile?: string | null;
   humanReviewRequired: boolean;
   humanReviewReason?: string | null;
   currentStep?: string | null;
@@ -118,6 +125,8 @@ export interface CreateTaskInput {
   workspacePath?: string;
   branchName?: string;
   providerAccount?: Provider | "auto";
+  orchestrationMode?: OrchestrationMode;
+  workflowProfile?: string;
   humanReviewRequired?: boolean;
   humanReviewReason?: string;
   priority?: number;
@@ -142,6 +151,7 @@ export interface TaskState {
     codexVersion: string | null;
     defaultModel: string;
   };
+  workflow: WorkflowSummary;
   generatedAt: string;
 }
 
@@ -149,9 +159,51 @@ export interface StartTaskInput {
   prompt?: string;
   model?: string;
   sandbox?: "read-only" | "workspace-write" | "danger-full-access";
+  maxTurns?: number;
 }
 
 export interface ExternalIssueInput {
   url: string;
   provider?: Provider;
+  orchestrationMode?: OrchestrationMode;
+  workflowProfile?: string;
+}
+
+export interface WorkflowProfileSummary {
+  id: string;
+  label: string;
+  orchestrationMode: OrchestrationMode;
+  model?: string | null;
+  sandbox?: StartTaskInput["sandbox"] | null;
+  maxTurns?: number | null;
+}
+
+export interface WorkflowSummary {
+  path: string | null;
+  status: "loaded" | "missing" | "invalid";
+  message: string;
+  defaultProfile: string;
+  profiles: WorkflowProfileSummary[];
+}
+
+export interface DoctorCheck {
+  id: string;
+  label: string;
+  status: "ok" | "warn" | "fail";
+  detail: string;
+}
+
+export interface DoctorReport {
+  generatedAt: string;
+  checks: DoctorCheck[];
+}
+
+export interface WorkspaceDiff {
+  taskId: string;
+  workspacePath: string | null;
+  isGitRepository: boolean;
+  status: string[];
+  stat: string;
+  files: string[];
+  generatedAt: string;
 }

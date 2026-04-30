@@ -3,6 +3,7 @@ import type { StartTaskInput, Task } from "../../shared/types";
 import type { TaskStore } from "../store";
 import { completeWithoutHumanReview } from "../taskCompletion";
 import { nowIso } from "../time";
+import { loadWorkflow, profileForTask, renderWorkflowPrompt } from "../workflow";
 import { AppServerProtocolClient, type AppServerProtocolMessage, type JsonRecord } from "./appServerProtocol";
 import { prepareTaskWorkspace } from "./workspace";
 
@@ -47,8 +48,8 @@ export class CodexRunner {
     const task = this.store.getTask(taskId);
     if (!task) throw new Error("任务不存在");
 
-    this.store.markChecklistDone(taskId, (label) => label.includes("解析") || label.includes("需求"), "任务已解析并进入执行流程");
-    this.store.setChecklistRunning(taskId, (label) => label.includes("仓库") || label.includes("工作区"), "正在准备任务工作区");
+    this.store.markChecklistDone(taskId, isIntakeChecklist, "任务已解析并进入执行流程");
+    this.store.setChecklistRunning(taskId, isWorkspaceChecklist, "正在准备任务工作区");
     let prepared: Awaited<ReturnType<typeof prepareTaskWorkspace>>;
     try {
       prepared = await prepareTaskWorkspace(task);
@@ -63,7 +64,7 @@ export class CodexRunner {
     mkdirSync(workspacePath, { recursive: true });
     this.store.markChecklistDone(
       taskId,
-      (label) => label.includes("仓库") || label.includes("工作区"),
+      isWorkspaceChecklist,
       prepared.bootstrapped ? `已克隆 ${task.repoUrl}` : `使用工作区 ${workspacePath}`
     );
 
@@ -87,7 +88,7 @@ export class CodexRunner {
     this.activeRuns.set(taskId, run);
 
     const startedAt = nowIso();
-    this.store.setChecklistRunning(taskId, (label) => label.includes("启动") || label.includes("执行"), "Codex app-server 已启动");
+    this.store.setChecklistRunning(taskId, isExecutionChecklist, "Codex app-server 已启动");
     this.store.updateTask(taskId, {
       status: "running",
       workspacePath,
@@ -137,8 +138,11 @@ export class CodexRunner {
     prompt: string,
     input: StartTaskInput
   ): Promise<void> {
-    const model = input.model?.trim() || defaultCodexModel();
-    const sandbox = input.sandbox ?? "workspace-write";
+    const workflow = loadWorkflow();
+    const profile = profileForTask(task, workflow);
+    const model = input.model?.trim() || profile.model || defaultCodexModel();
+    const sandbox = input.sandbox ?? profile.sandbox ?? "workspace-write";
+    const maxTurns = input.maxTurns ?? profile.maxTurns ?? 1;
 
     const completion = new Promise<TurnOutcome>((resolve) => {
       run.resolveCompletion = resolve;
@@ -146,6 +150,12 @@ export class CodexRunner {
 
     const initResult = await run.client.initialize();
     this.store.addEvent(taskId, "runner.codex_event", "initialize: Codex app-server 已握手", initResult);
+    this.store.addEvent(taskId, "workflow.loaded", `工作流 profile: ${profile.label}`, {
+      workflowPath: workflow.path,
+      orchestrationMode: profile.orchestrationMode,
+      profile: profile.id,
+      maxTurns
+    });
 
     const threadResult = await openThread(run.client, task, workspacePath, model, sandbox);
     const threadId = nestedString(threadResult, "thread", "id");
@@ -208,8 +218,8 @@ export class CodexRunner {
         if (threadId) run.threadId = threadId;
         if (turnId) run.turnId = turnId;
       }
-      this.store.markChecklistDone(taskId, (label) => label.includes("启动") || label.includes("执行"), "Codex turn 已启动");
-      this.store.setChecklistRunning(taskId, (label) => label.includes("跟踪") || label.includes("日志"), "正在采集 app-server 事件流");
+      this.store.markChecklistDone(taskId, isExecutionChecklist, "Codex turn 已启动");
+      this.store.setChecklistRunning(taskId, isTrackingChecklist, "正在采集 app-server 事件流");
       this.store.updateTask(taskId, {
         lastCodexThreadId: threadId ?? run?.threadId,
         lastCodexTurnId: turnId ?? run?.turnId,
@@ -306,8 +316,8 @@ export class CodexRunner {
       run.client.shutdown();
       this.activeRuns.delete(taskId);
     }
-    this.store.markChecklistDone(taskId, (label) => label.includes("跟踪") || label.includes("日志"), "已采集 Codex app-server 事件流");
-    this.store.markChecklistDone(taskId, (label) => label.includes("整理") || label.includes("证据"), "执行输出已写入事件流");
+    this.store.markChecklistDone(taskId, isTrackingChecklist, "已采集 Codex app-server 事件流");
+    this.store.markChecklistDone(taskId, isEvidenceChecklist, "执行输出已写入事件流");
     const latest = this.store.getTask(taskId);
     if (!latest) return;
     this.store.updateTask(taskId, {
@@ -317,7 +327,7 @@ export class CodexRunner {
       currentStep: latest.humanReviewRequired ? "等待人工复核" : "执行完成"
     });
     if (latest.humanReviewRequired) {
-      this.store.setChecklistRunning(taskId, (label) => label.includes("人工复核"), "等待你复核 Codex 最终回答和产物");
+      this.store.setChecklistRunning(taskId, isReviewChecklist, "等待你复核 Codex 最终回答和产物");
       this.store.addEvent(taskId, "review.requested", latest.humanReviewReason || "Codex 执行完成，等待人工复核");
     } else {
       const completed = this.store.getTask(taskId);
@@ -333,7 +343,7 @@ export class CodexRunner {
       run.client.shutdown();
       this.activeRuns.delete(taskId);
     }
-    this.store.markChecklistBlocked(taskId, (label) => label.includes("启动") || label.includes("执行"), message);
+    this.store.markChecklistBlocked(taskId, isExecutionChecklist, message);
     this.store.updateTask(taskId, {
       status: "failed",
       runPid: null,
@@ -385,15 +395,30 @@ function buildRunPrompt(task: Task): string {
 function buildInitialPrompt(task: Task): string {
   const checklist = task.checklist.map((item) => `- [${item.status === "done" ? "x" : " "}] ${item.label}`).join("\n");
   const source = task.sourceRef?.url ? `\n外部来源：${task.sourceRef.url}` : "";
+  const workflow = loadWorkflow();
+  const profile = profileForTask(task, workflow);
+  const renderedWorkflow = renderWorkflowPrompt(task, profile, workflow);
+  const blackboxPolicy =
+    task.orchestrationMode === "symphony_blackbox"
+      ? [
+          "Symphony 黑盒模式要求：",
+          "- 你是被长期运行的 orchestrator 分派的 agent，不需要解释每一步内部过程。",
+          "- 优先按 tracker / repo 工作流推进到 Human Review 或完成状态。",
+          "- 最终交接只输出结果、验证证据、剩余风险和外部 tracker 下一步。"
+        ].join("\n")
+      : "本地可视化模式要求：保留清晰步骤和证据，方便操作者在面板中复核。";
   return [
-    "你正在由 Codex Manager 执行一个本地可观察任务。",
-    "请按 checklist 推进，过程中保留清晰的证据；完成代码或分析后停在可供人工复核的状态。",
+    renderedWorkflow,
+    "",
+    blackboxPolicy,
     "",
     `任务标题：${task.title}`,
     task.description ? `任务描述：${task.description}` : "",
     task.repoUrl ? `目标仓库：${task.repoUrl}` : "",
     task.branchName ? `目标分支：${task.branchName}` : "",
     source,
+    task.workflowProfile ? `Workflow profile：${task.workflowProfile}` : "",
+    `Orchestration mode：${task.orchestrationMode}`,
     "",
     "Checklist:",
     checklist
@@ -422,6 +447,30 @@ function buildContinuationPrompt(task: Task): string {
 
 function shouldResumeThread(task: Task): boolean {
   return Boolean(task.lastCodexThreadId && ["needs_input", "blocked", "failed"].includes(task.status));
+}
+
+function isIntakeChecklist(label: string): boolean {
+  return label.includes("解析") || label.includes("需求") || label.includes("领取");
+}
+
+function isWorkspaceChecklist(label: string): boolean {
+  return label.includes("仓库") || label.includes("工作区") || label.includes("准备");
+}
+
+function isExecutionChecklist(label: string): boolean {
+  return label.includes("启动") || label.includes("执行") || label.includes("agent");
+}
+
+function isTrackingChecklist(label: string): boolean {
+  return label.includes("跟踪") || label.includes("日志") || label.includes("等待 agent");
+}
+
+function isEvidenceChecklist(label: string): boolean {
+  return label.includes("整理") || label.includes("证据") || label.includes("tracker") || label.includes("Human Review");
+}
+
+function isReviewChecklist(label: string): boolean {
+  return label.includes("人工复核") || label.includes("Human Review") || label.includes("human");
 }
 
 function latestOperatorNote(task: Task): string | null {

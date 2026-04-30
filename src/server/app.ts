@@ -6,11 +6,15 @@ import { sortTasksByOperatorPriority } from "../shared/status";
 import type { TaskState } from "../shared/types";
 import { importExternalIssue } from "./integrations/taskSources";
 import { detectGitIdentities } from "./integrations/gitIdentity";
+import { syncExternalTask } from "./integrations/externalSync";
 import { CodexRunner, defaultCodexModel } from "./runners/codexRunner";
 import { isLegacyManagedWorkspacePath } from "./runners/workspace";
 import { TaskStore } from "./store";
 import { approveAndArchiveTask, reconcileCompletedTaskChecklists } from "./taskCompletion";
 import { nowIso } from "./time";
+import { loadWorkflow, workflowSummary } from "./workflow";
+import { runDoctor } from "./doctor";
+import { workspaceDiff } from "./diff";
 
 const createTaskSchema = z.object({
   title: z.string().min(1),
@@ -19,6 +23,8 @@ const createTaskSchema = z.object({
   workspacePath: z.string().optional(),
   branchName: z.string().optional(),
   providerAccount: z.enum(["github", "gitlab", "auto"]).optional(),
+  orchestrationMode: z.enum(["local_cockpit", "symphony_blackbox"]).optional(),
+  workflowProfile: z.string().optional(),
   humanReviewRequired: z.boolean().optional(),
   humanReviewReason: z.string().optional(),
   priority: z.number().int().min(1).max(5).optional(),
@@ -28,17 +34,25 @@ const createTaskSchema = z.object({
 const startTaskSchema = z.object({
   prompt: z.string().optional(),
   model: z.string().optional(),
-  sandbox: z.enum(["read-only", "workspace-write", "danger-full-access"]).optional()
+  sandbox: z.enum(["read-only", "workspace-write", "danger-full-access"]).optional(),
+  maxTurns: z.number().int().positive().optional()
 });
 
 const importIssueSchema = z.object({
   url: z.string().url(),
-  provider: z.enum(["github", "gitlab"]).optional()
+  provider: z.enum(["github", "gitlab"]).optional(),
+  orchestrationMode: z.enum(["local_cockpit", "symphony_blackbox"]).optional(),
+  workflowProfile: z.string().optional()
 });
 
 const reviewSchema = z.object({
   decision: z.enum(["approve", "changes_requested", "block"]),
   note: z.string().optional()
+});
+
+const modeSchema = z.object({
+  orchestrationMode: z.enum(["local_cockpit", "symphony_blackbox"]),
+  workflowProfile: z.string().optional()
 });
 
 export function createApp() {
@@ -53,6 +67,18 @@ export function createApp() {
 
   app.get("/api/health", (_req, res) => {
     res.json({ ok: true, generatedAt: nowIso() });
+  });
+
+  app.get("/api/workflow", (_req, res) => {
+    res.json(workflowSummary());
+  });
+
+  app.get("/api/doctor", async (_req, res, next) => {
+    try {
+      res.json(await runDoctor());
+    } catch (error) {
+      next(error);
+    }
   });
 
   app.get("/api/state", async (_req, res, next) => {
@@ -77,6 +103,7 @@ export function createApp() {
           codexVersion: await commandVersion("codex", ["--version"]),
           defaultModel: defaultCodexModel()
         },
+        workflow: workflowSummary(loadWorkflow()),
         generatedAt: nowIso()
       };
       res.json(state);
@@ -106,6 +133,16 @@ export function createApp() {
       if (!insideWorkspace) return res.status(403).json({ error: "只能读取任务工作区内的文件" });
 
       res.type("text/plain").send(readFileSync(realRequestedPath, "utf8"));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/tasks/:taskId/diff", async (req, res, next) => {
+    try {
+      const task = store.getTask(req.params.taskId);
+      if (!task) return res.status(404).json({ error: "任务不存在" });
+      res.json(await workspaceDiff(task));
     } catch (error) {
       next(error);
     }
@@ -141,6 +178,26 @@ export function createApp() {
     }
   });
 
+  app.post("/api/tasks/:taskId/mode", (req, res, next) => {
+    try {
+      const input = modeSchema.parse(req.body ?? {});
+      const task = store.getTask(req.params.taskId);
+      if (!task) return res.status(404).json({ error: "任务不存在" });
+      const updated = store.updateTask(task.id, {
+        orchestrationMode: input.orchestrationMode,
+        workflowProfile: input.workflowProfile ?? task.workflowProfile ?? null,
+        currentStep: input.orchestrationMode === "symphony_blackbox" ? "已切换到 Symphony 黑盒视图" : "已切换到本地可视化视图"
+      });
+      store.addEvent(task.id, "workflow.mode_changed", updated.currentStep ?? "工作流模式已切换", {
+        orchestrationMode: updated.orchestrationMode,
+        workflowProfile: updated.workflowProfile
+      });
+      res.json(store.getTask(task.id));
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.post("/api/tasks/:taskId/stop", (req, res, next) => {
     try {
       res.json(runner.stop(req.params.taskId));
@@ -149,13 +206,25 @@ export function createApp() {
     }
   });
 
-  app.post("/api/tasks/:taskId/review", (req, res, next) => {
+  app.post("/api/tasks/:taskId/review", async (req, res, next) => {
     try {
       const input = reviewSchema.parse(req.body);
       const task = store.getTask(req.params.taskId);
       if (!task) return res.status(404).json({ error: "任务不存在" });
       if (input.decision === "approve") {
-        res.json(approveAndArchiveTask(store, task, input.note));
+        const archived = approveAndArchiveTask(store, task, input.note);
+        const syncResult = await syncExternalTask(archived, input.note);
+        if (syncResult.status === "completed") {
+          store.markChecklistDone(archived.id, (label) => label.includes("同步") || label.includes("tracker"), syncResult.message);
+          store.addEvent(archived.id, "sync.completed", syncResult.message, syncResult);
+        } else if (syncResult.status === "failed") {
+          store.markChecklistBlocked(archived.id, (label) => label.includes("同步") || label.includes("tracker"), syncResult.message);
+          store.updateTask(archived.id, { status: "sync_drift", currentStep: syncResult.message });
+          store.addEvent(archived.id, "sync.failed", syncResult.message, syncResult);
+        } else {
+          store.addEvent(archived.id, "sync.completed", syncResult.message, syncResult);
+        }
+        res.json(store.getTask(task.id));
         return;
       } else if (input.decision === "changes_requested") {
         if (runner.isRunning(task.id)) {
