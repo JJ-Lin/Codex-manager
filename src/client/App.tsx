@@ -133,7 +133,7 @@ export default function App() {
           <div className="runtime-card">
             <Bot size={18} />
             <div>
-              <span>Codex</span>
+              <span>Codex · {state?.runner.defaultModel ?? "model"}</span>
               <strong>{state?.runner.codexVersion ?? "未检测到"}</strong>
             </div>
           </div>
@@ -153,9 +153,9 @@ export default function App() {
         {selectedTask ? (
           <TaskDetail
             task={selectedTask}
-            onStart={(task) => runAction(() => api.startTask(task.id))}
+            onStart={(task, input) => runAction(() => api.startTask(task.id, input))}
             onStop={(task) => runAction(() => api.stopTask(task.id))}
-            onReview={(task: Task, decision) => runAction(() => api.review(task.id, decision))}
+            onReview={(task: Task, decision, note) => runAction(() => api.review(task.id, decision, note))}
           />
         ) : (
           <aside className="detail-panel empty-detail">还没有任务。先创建一个本地任务或同步一个 GitHub/GitLab issue。</aside>

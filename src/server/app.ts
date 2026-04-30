@@ -1,12 +1,12 @@
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { join, resolve, sep } from "node:path";
 import express from "express";
 import { z } from "zod";
 import { sortTasksByOperatorPriority } from "../shared/status";
 import type { TaskState } from "../shared/types";
 import { importExternalIssue } from "./integrations/taskSources";
 import { detectGitIdentities } from "./integrations/gitIdentity";
-import { CodexRunner } from "./runners/codexRunner";
+import { CodexRunner, defaultCodexModel } from "./runners/codexRunner";
 import { isLegacyManagedWorkspacePath } from "./runners/workspace";
 import { TaskStore } from "./store";
 import { nowIso } from "./time";
@@ -72,7 +72,8 @@ export function createApp() {
         runner: {
           activeTaskIds: runner.activeTaskIds(),
           codexAvailable: await commandAvailable("codex"),
-          codexVersion: await commandVersion("codex", ["--version"])
+          codexVersion: await commandVersion("codex", ["--version"]),
+          defaultModel: defaultCodexModel()
         },
         generatedAt: nowIso()
       };
@@ -86,6 +87,26 @@ export function createApp() {
     const task = store.getTask(req.params.taskId);
     if (!task) return res.status(404).json({ error: "任务不存在" });
     res.json(task);
+  });
+
+  app.get("/api/tasks/:taskId/files/read", (req, res, next) => {
+    try {
+      const task = store.getTask(req.params.taskId);
+      if (!task) return res.status(404).json({ error: "任务不存在" });
+      if (!task.workspacePath) return res.status(400).json({ error: "任务没有工作区" });
+      const rawPath = typeof req.query.path === "string" ? req.query.path : "";
+      if (!rawPath.trim()) return res.status(400).json({ error: "缺少文件路径" });
+
+      const workspaceRoot = realpathSync(task.workspacePath);
+      const requestedPath = rawPath.startsWith(sep) ? rawPath : resolve(workspaceRoot, rawPath);
+      const realRequestedPath = realpathSync(requestedPath);
+      const insideWorkspace = realRequestedPath === workspaceRoot || realRequestedPath.startsWith(`${workspaceRoot}${sep}`);
+      if (!insideWorkspace) return res.status(403).json({ error: "只能读取任务工作区内的文件" });
+
+      res.type("text/plain").send(readFileSync(realRequestedPath, "utf8"));
+    } catch (error) {
+      next(error);
+    }
   });
 
   app.post("/api/tasks", (req, res, next) => {

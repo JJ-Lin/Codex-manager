@@ -22,6 +22,11 @@ type TurnOutcome =
 
 const NON_INTERACTIVE_ANSWER = "Codex Manager 当前是非交互式执行环境，无法在任务过程中等待人工输入。";
 const STDERR_LIMIT = 1200;
+const DEFAULT_CODEX_MODEL = "gpt-5.5";
+
+export function defaultCodexModel(): string {
+  return process.env.CODEX_MANAGER_MODEL || DEFAULT_CODEX_MODEL;
+}
 
 export class CodexRunner {
   private activeRuns = new Map<string, ActiveRun>();
@@ -60,7 +65,7 @@ export class CodexRunner {
       prepared.bootstrapped ? `已克隆 ${task.repoUrl}` : `使用工作区 ${workspacePath}`
     );
 
-    const prompt = input.prompt?.trim() || buildPrompt(task);
+    const prompt = input.prompt?.trim() || buildRunPrompt(task);
     const codexBin = process.env.CODEX_MANAGER_CODEX_BIN ?? "codex";
     const client = new AppServerProtocolClient({
       codexBin,
@@ -95,7 +100,7 @@ export class CodexRunner {
       command: `${codexBin} app-server`
     });
 
-    void this.runAppServerTurn(taskId, run, workspacePath, prompt, input).catch((error: unknown) => {
+    void this.runAppServerTurn(taskId, run, task, workspacePath, prompt, input).catch((error: unknown) => {
       this.failRun(taskId, error instanceof Error ? error.message : String(error));
     });
 
@@ -125,11 +130,12 @@ export class CodexRunner {
   private async runAppServerTurn(
     taskId: string,
     run: ActiveRun,
+    task: Task,
     workspacePath: string,
     prompt: string,
     input: StartTaskInput
   ): Promise<void> {
-    const model = input.model?.trim() || process.env.CODEX_MANAGER_MODEL || "gpt-5.4";
+    const model = input.model?.trim() || defaultCodexModel();
     const sandbox = input.sandbox ?? "workspace-write";
 
     const completion = new Promise<TurnOutcome>((resolve) => {
@@ -139,23 +145,17 @@ export class CodexRunner {
     const initResult = await run.client.initialize();
     this.store.addEvent(taskId, "runner.codex_event", "initialize: Codex app-server 已握手", initResult);
 
-    const threadResult = await run.client.request<JsonRecord>("thread/start", {
-      approvalPolicy: "never",
-      cwd: workspacePath,
-      model,
-      sandbox,
-      experimentalRawEvents: true,
-      persistExtendedHistory: true
-    });
+    const threadResult = await openThread(run.client, task, workspacePath, model, sandbox);
     const threadId = nestedString(threadResult, "thread", "id");
     if (!threadId) throw new Error("Codex app-server 未返回 thread id");
+    const openedByResume = Boolean(threadResult.__codexManagerResumed);
     run.threadId = threadId;
     this.store.updateTask(taskId, {
       lastCodexThreadId: threadId,
       lastCodexSessionId: threadId,
-      currentStep: "Codex thread 已创建"
+      currentStep: openedByResume ? "Codex thread 已恢复" : "Codex thread 已创建"
     });
-    this.store.addEvent(taskId, "runner.codex_event", `thread/start: ${threadId}`, threadResult);
+    this.store.addEvent(taskId, "runner.codex_event", `${openedByResume ? "thread/resume" : "thread/start"}: ${threadId}`, threadResult);
 
     const turnResult = await run.client.request<JsonRecord>("turn/start", {
       threadId,
@@ -316,6 +316,7 @@ export class CodexRunner {
       currentStep: latest.humanReviewRequired ? "等待人工复核" : "执行完成"
     });
     if (latest.humanReviewRequired) {
+      this.store.setChecklistRunning(taskId, (label) => label.includes("人工复核"), "等待你复核 Codex 最终回答和产物");
       this.store.addEvent(taskId, "review.requested", latest.humanReviewReason || "Codex 执行完成，等待人工复核");
     }
     this.store.addEvent(taskId, "runner.finished", "Codex app-server turn 已完成", payload);
@@ -339,7 +340,45 @@ export class CodexRunner {
   }
 }
 
-function buildPrompt(task: Task): string {
+async function openThread(
+  client: AppServerProtocolClient,
+  task: Task,
+  workspacePath: string,
+  model: string,
+  sandbox: StartTaskInput["sandbox"]
+): Promise<JsonRecord> {
+  if (shouldResumeThread(task) && task.lastCodexThreadId) {
+    try {
+      const resumed = await client.request<JsonRecord>("thread/resume", {
+        threadId: task.lastCodexThreadId,
+        cwd: workspacePath,
+        model,
+        approvalPolicy: "never",
+        sandbox,
+        persistExtendedHistory: true
+      });
+      return { ...resumed, __codexManagerResumed: true };
+    } catch {
+      // If the local rollout was removed or the app-server cannot resume it,
+      // fall back to a fresh thread so the operator can still make progress.
+    }
+  }
+
+  return client.request<JsonRecord>("thread/start", {
+    approvalPolicy: "never",
+    cwd: workspacePath,
+    model,
+    sandbox,
+    experimentalRawEvents: true,
+    persistExtendedHistory: true
+  });
+}
+
+function buildRunPrompt(task: Task): string {
+  return shouldResumeThread(task) ? buildContinuationPrompt(task) : buildInitialPrompt(task);
+}
+
+function buildInitialPrompt(task: Task): string {
   const checklist = task.checklist.map((item) => `- [${item.status === "done" ? "x" : " "}] ${item.label}`).join("\n");
   const source = task.sourceRef?.url ? `\n外部来源：${task.sourceRef.url}` : "";
   return [
@@ -357,6 +396,36 @@ function buildPrompt(task: Task): string {
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+function buildContinuationPrompt(task: Task): string {
+  const checklist = task.checklist.map((item) => `- [${item.status === "done" ? "x" : " "}] ${item.label}`).join("\n");
+  const reviewNote = latestOperatorNote(task);
+  return [
+    "Continuation guidance:",
+    "",
+    "- The previous Codex turn already ran in this task. Resume from the current workspace and previous thread context instead of restarting from scratch.",
+    "- Do not restate the original task. Focus on the remaining checklist items and the operator's latest review note.",
+    "- If you produce a reviewable artifact, write it to the workspace and mention the exact path in your final answer.",
+    reviewNote ? `- Operator review note: ${reviewNote}` : "",
+    "",
+    "Current checklist:",
+    checklist
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function shouldResumeThread(task: Task): boolean {
+  return Boolean(task.lastCodexThreadId && ["needs_input", "blocked", "failed"].includes(task.status));
+}
+
+function latestOperatorNote(task: Task): string | null {
+  for (const event of [...task.events].reverse()) {
+    if (!["review.changes_requested", "task.note"].includes(event.kind)) continue;
+    if (event.message.trim()) return event.message.trim();
+  }
+  return null;
 }
 
 function sandboxPolicyFor(sandbox: StartTaskInput["sandbox"], workspacePath: string): JsonRecord {

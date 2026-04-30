@@ -421,6 +421,66 @@ button {
   line-height: 1.45;
 }
 
+.review-material {
+  display: grid;
+  gap: 10px;
+}
+
+.review-material pre {
+  margin: 0;
+  max-height: 280px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 12px;
+  border: 1px solid #d8e0e7;
+  border-radius: 8px;
+  background: #fbfcfd;
+  color: #25343f;
+  font: 12px/1.55 "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.review-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.review-files a {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid #c7d8e8;
+  background: #edf6ff;
+  color: #174a75;
+  font-size: 12px;
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.review-note {
+  display: grid;
+  gap: 6px;
+}
+
+.review-note span {
+  color: #61717d;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.review-note textarea {
+  resize: vertical;
+  min-height: 82px;
+  border: 1px solid #cdd7df;
+  border-radius: 8px;
+  padding: 10px;
+  font: inherit;
+}
+
 .detail-actions {
   display: flex;
   gap: 8px;

@@ -15,7 +15,7 @@ review, where a task is in its checklist, and which Codex events were produced w
 - Track a structured checklist for each task.
 - Run `codex app-server` in a per-task workspace and start a real Codex thread/turn.
 - Persist app-server thread, turn, item, approval, tool, and output events so the run is inspectable.
-- Promote completed runs into `需要人工复核` when human review is required.
+- Promote completed runs into a visible review gate with the final answer and reviewable artifacts.
 - Approve, request changes, block, stop, or continue tasks from the UI.
 
 ## Run Locally
@@ -50,7 +50,7 @@ project directory itself contains non-ASCII characters:
 ~/.codex-manager/workspaces/
 ```
 
-Override the workspace root or runner model with:
+The default model is `gpt-5.5`. Override the workspace root or runner model with:
 
 ```bash
 CODEX_MANAGER_WORKSPACE_ROOT=/tmp/codex-manager-workspaces CODEX_MANAGER_MODEL=gpt-5.4 npm start
@@ -91,6 +91,7 @@ The implementation follows Symphony's useful boundaries but changes the product 
 - `TaskSourceAdapter`: GitHub/GitLab import and future bidirectional sync boundary.
 - `AppServerProtocolClient`: newline-delimited JSON-RPC client for `codex app-server`.
 - `CodexRunner`: starts a Codex thread/turn, handles approval requests, and normalizes app-server events.
+- Review gate: extracts the final assistant message and local workspace artifacts from app-server events.
 - `WorkspaceManager`: per-task workspace resolution with an ASCII managed root, ready for remote worker support later.
 - React console: three-panel operator cockpit with review-first task ordering.
 

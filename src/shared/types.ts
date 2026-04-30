@@ -140,6 +140,7 @@ export interface TaskState {
     activeTaskIds: string[];
     codexAvailable: boolean;
     codexVersion: string | null;
+    defaultModel: string;
   };
   generatedAt: string;
 }

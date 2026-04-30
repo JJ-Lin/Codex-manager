@@ -1,18 +1,30 @@
+import { useEffect, useState } from "react";
 import { Check, Circle, ExternalLink, FileText, Pause, Play, RotateCcw, ShieldCheck, SquareTerminal } from "lucide-react";
 import { checklistProgress } from "../../shared/status";
-import type { Task } from "../../shared/types";
+import type { StartTaskInput, Task } from "../../shared/types";
 import { StatusBadge } from "./StatusBadge";
 
 interface Props {
   task: Task;
-  onStart: (task: Task) => Promise<void>;
+  onStart: (task: Task, input?: StartTaskInput) => Promise<void>;
   onStop: (task: Task) => Promise<void>;
-  onReview: (task: Task, decision: "approve" | "changes_requested" | "block") => Promise<void>;
+  onReview: (task: Task, decision: "approve" | "changes_requested" | "block", note?: string) => Promise<void>;
 }
 
 export function TaskDetail({ task, onStart, onStop, onReview }: Props) {
   const progress = checklistProgress(task.checklist);
   const rawEvents = task.events.filter((event) => event.kind === "runner.codex_event");
+  const reviewArtifact = extractReviewArtifact(task);
+  const [reviewNote, setReviewNote] = useState("");
+
+  useEffect(() => {
+    setReviewNote("");
+  }, [task.id, task.status]);
+
+  async function requestChangesAndContinue() {
+    await onReview(task, "changes_requested", reviewNote.trim() || "需要继续处理复核意见");
+    await onStart(task);
+  }
 
   return (
     <aside className="detail-panel">
@@ -32,7 +44,7 @@ export function TaskDetail({ task, onStart, onStop, onReview }: Props) {
           <ShieldCheck size={18} />
           <div>
             <strong>需要人工复核</strong>
-            <span>{task.humanReviewReason || "Codex 已停止在可复核状态，需要你确认结果后再归档。"}</span>
+            <span>{task.humanReviewReason || "Codex 已停止在可复核状态，需要你确认最终回答和产物后再归档。"}</span>
           </div>
         </div>
       ) : null}
@@ -43,21 +55,64 @@ export function TaskDetail({ task, onStart, onStop, onReview }: Props) {
             <Pause size={16} />
             停止
           </button>
-        ) : (
+        ) : task.status === "needs_review" ? null : (
           <button className="primary" type="button" onClick={() => onStart(task)}>
             <Play size={16} />
-            继续执行
+            {task.status === "draft" ? "开始执行" : "继续执行"}
           </button>
         )}
-        <button className="secondary" type="button" onClick={() => onReview(task, "approve")} disabled={task.status !== "needs_review"}>
-          <Check size={16} />
-          复核通过
-        </button>
-        <button className="secondary" type="button" onClick={() => onReview(task, "changes_requested")}>
-          <RotateCcw size={16} />
-          请求修改
-        </button>
+        {task.status === "needs_review" ? (
+          <>
+            <button className="primary" type="button" onClick={() => onReview(task, "approve", reviewNote.trim() || undefined)}>
+              <Check size={16} />
+              复核通过并归档
+            </button>
+            <button className="secondary" type="button" onClick={requestChangesAndContinue}>
+              <RotateCcw size={16} />
+              按意见继续执行
+            </button>
+            <button className="secondary" type="button" onClick={() => onReview(task, "block", reviewNote.trim() || undefined)}>
+              <Pause size={16} />
+              标记阻塞
+            </button>
+          </>
+        ) : null}
       </div>
+
+      {task.status === "needs_review" ? (
+        <section className="detail-section review-material">
+          <div className="section-title">
+            <ShieldCheck size={16} />
+            复核材料
+            <span className="section-hint">最终回答和产物路径</span>
+          </div>
+          {reviewArtifact ? (
+            <>
+              {reviewArtifact.files.length > 0 ? (
+                <div className="review-files">
+                  {reviewArtifact.files.map((file) => (
+                    <a href={`/api/tasks/${task.id}/files/read?path=${encodeURIComponent(file.path)}`} target="_blank" rel="noreferrer" key={file.path}>
+                      <FileText size={14} />
+                      {file.label}
+                    </a>
+                  ))}
+                </div>
+              ) : null}
+              <pre>{reviewArtifact.text}</pre>
+            </>
+          ) : (
+            <div className="empty">没有提取到最终回答。请查看下方执行事件。</div>
+          )}
+          <label className="review-note">
+            <span>复核意见</span>
+            <textarea
+              value={reviewNote}
+              onChange={(event) => setReviewNote(event.target.value)}
+              placeholder="通过时可留空；如果要继续执行，在这里写清楚要补什么、改什么。"
+            />
+          </label>
+        </section>
+      ) : null}
 
       <section className="detail-section current-step">
         <div className="section-title">
@@ -118,6 +173,60 @@ export function TaskDetail({ task, onStart, onStop, onReview }: Props) {
       </section>
     </aside>
   );
+}
+
+interface ReviewArtifact {
+  text: string;
+  files: Array<{ label: string; path: string }>;
+}
+
+function extractReviewArtifact(task: Task): ReviewArtifact | null {
+  for (const event of [...task.events].reverse()) {
+    if (event.kind !== "runner.codex_event") continue;
+    const payload = asRecord(event.payload);
+    const method = stringValue(payload.method);
+    const params = asRecord(payload.params);
+    const item = asRecord(params.item);
+
+    if (method === "item/completed" && item.type === "agentMessage") {
+      const text = stringValue(item.text);
+      if (text) return { text, files: extractLocalMarkdownLinks(text) };
+    }
+
+    if (method === "rawResponseItem/completed" && item.role === "assistant") {
+      const text = outputTextFromRawItem(item);
+      if (text) return { text, files: extractLocalMarkdownLinks(text) };
+    }
+  }
+  return null;
+}
+
+function outputTextFromRawItem(item: Record<string, unknown>): string | null {
+  const content = Array.isArray(item.content) ? item.content : [];
+  const parts = content
+    .map((part) => {
+      const record = asRecord(part);
+      return record.type === "output_text" ? stringValue(record.text) : null;
+    })
+    .filter((part): part is string => Boolean(part));
+  return parts.length > 0 ? parts.join("\n") : null;
+}
+
+function extractLocalMarkdownLinks(text: string): Array<{ label: string; path: string }> {
+  const links: Array<{ label: string; path: string }> = [];
+  const pattern = /\[([^\]]+)\]\((\/[^)]+)\)/g;
+  for (const match of text.matchAll(pattern)) {
+    links.push({ label: match[1] ?? match[2] ?? "文件", path: match[2] ?? "" });
+  }
+  return links.filter((link) => link.path);
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
 function InfoRow({ label, value, href }: { label: string; value: string; href?: string }) {
