@@ -47,6 +47,7 @@ const reviewSchema = z.object({
 export function createApp() {
   const app = express();
   const store = new TaskStore();
+  store.recoverInterruptedRuns();
   const runner = new CodexRunner(store);
 
   app.use(express.json({ limit: "2mb" }));

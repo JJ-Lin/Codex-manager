@@ -37,6 +37,19 @@ export class TaskStore {
     return rows.map((row) => this.hydrateTask(row));
   }
 
+  recoverInterruptedRuns(): void {
+    const tasks = this.listTasks().filter((task) => task.runPid !== null || task.status === "running");
+    for (const task of tasks) {
+      const nextStatus: TaskStatus = task.status === "running" ? "blocked" : task.status;
+      this.updateTask(task.id, {
+        status: nextStatus,
+        runPid: null,
+        currentStep: task.status === "running" ? "服务重启后需要人工确认运行结果" : task.currentStep
+      });
+      this.addEvent(task.id, "runner.stopped", "服务启动时清理了未受管理的旧运行状态", { previousPid: task.runPid });
+    }
+  }
+
   getTask(taskId: string): Task | null {
     const row = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(taskId) as Row | undefined;
     return row ? this.hydrateTask(row) : null;
