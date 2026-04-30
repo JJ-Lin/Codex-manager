@@ -13,6 +13,7 @@ interface ActiveRun {
 
 export class CodexRunner {
   private activeRuns = new Map<string, ActiveRun>();
+  private stoppedTaskIds = new Set<string>();
 
   constructor(private readonly store: TaskStore) {}
 
@@ -68,6 +69,7 @@ export class CodexRunner {
       cwd: workspacePath,
       env: { ...process.env, FORCE_COLOR: "0" }
     });
+    child.stdin.end();
 
     this.activeRuns.set(taskId, { child, taskId });
     this.store.updateTask(taskId, {
@@ -106,6 +108,9 @@ export class CodexRunner {
 
     child.on("close", (code, signal) => {
       this.activeRuns.delete(taskId);
+      if (this.stoppedTaskIds.delete(taskId)) {
+        return;
+      }
       const latest = this.store.getTask(taskId);
       if (!latest) return;
       if (code === 0) {
@@ -141,6 +146,7 @@ export class CodexRunner {
     const run = this.activeRuns.get(taskId);
     if (!run) throw new Error("任务当前没有运行中的 Codex 进程");
     run.child.kill("SIGTERM");
+    this.stoppedTaskIds.add(taskId);
     this.activeRuns.delete(taskId);
     this.store.updateTask(taskId, {
       status: "blocked",

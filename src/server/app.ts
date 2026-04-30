@@ -147,9 +147,15 @@ export function createApp() {
         store.updateTask(task.id, { status: "completed", currentStep: "人工复核通过，任务完成", finishedAt: nowIso() });
         store.addEvent(task.id, "review.approved", input.note || "人工复核已通过");
       } else if (input.decision === "changes_requested") {
+        if (runner.isRunning(task.id)) {
+          runner.stop(task.id);
+        }
         store.updateTask(task.id, { status: "needs_input", currentStep: "复核要求修改" });
         store.addEvent(task.id, "review.changes_requested", input.note || "复核要求修改");
       } else {
+        if (runner.isRunning(task.id)) {
+          runner.stop(task.id);
+        }
         store.updateTask(task.id, { status: "blocked", currentStep: "人工标记阻塞" });
         store.addEvent(task.id, "task.note", input.note || "人工标记阻塞");
       }
