@@ -13,8 +13,8 @@ review, where a task is in its checklist, and which Codex events were produced w
 - Import GitHub and GitLab issue URLs into local tasks.
 - Detect the local Git identities configured for GitHub and GitLab.
 - Track a structured checklist for each task.
-- Run `codex exec --json --model gpt-5.4` in a per-task workspace by default.
-- Persist Codex JSONL events so the run is inspectable after the process exits.
+- Run `codex app-server` in a per-task workspace and start a real Codex thread/turn.
+- Persist app-server thread, turn, item, approval, tool, and output events so the run is inspectable.
 - Promote completed runs into `需要人工复核` when human review is required.
 - Approve, request changes, block, stop, or continue tasks from the UI.
 
@@ -89,12 +89,18 @@ The implementation follows Symphony's useful boundaries but changes the product 
 
 - `TaskStore`: persistent canonical tasks, checklist items, and event stream.
 - `TaskSourceAdapter`: GitHub/GitLab import and future bidirectional sync boundary.
-- `CodexRunner`: `codex exec --json --model gpt-5.4` subprocess wrapper and event normalizer.
+- `AppServerProtocolClient`: newline-delimited JSON-RPC client for `codex app-server`.
+- `CodexRunner`: starts a Codex thread/turn, handles approval requests, and normalizes app-server events.
 - `WorkspaceManager`: per-task workspace resolution with an ASCII managed root, ready for remote worker support later.
 - React console: three-panel operator cockpit with review-first task ordering.
 
 Unlike the Symphony reference implementation, checklists, human review state, and Codex events are
 not only stored in an external tracker comment. They are first-class local records.
+
+The app-server thread is persisted by Codex under `~/.codex/sessions/...` and its thread/turn ids are
+stored on the task. It does not open a new visible Codex Desktop chat window automatically; the
+manager records the detailed event stream locally and keeps the session identifiers for future resume
+and steering features.
 
 ## Tests
 

@@ -1,19 +1,30 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdirSync } from "node:fs";
-import { join } from "node:path";
 import type { StartTaskInput, Task } from "../../shared/types";
 import type { TaskStore } from "../store";
 import { nowIso } from "../time";
+import { AppServerProtocolClient, type AppServerProtocolMessage, type JsonRecord } from "./appServerProtocol";
 import { prepareTaskWorkspace } from "./workspace";
 
 interface ActiveRun {
-  child: ChildProcessWithoutNullStreams;
+  client: AppServerProtocolClient;
   taskId: string;
+  threadId?: string;
+  turnId?: string;
+  resolveCompletion?: (outcome: TurnOutcome) => void;
+  stopped: boolean;
+  completed: boolean;
 }
+
+type TurnOutcome =
+  | { status: "completed"; payload: AppServerProtocolMessage }
+  | { status: "failed"; message: string; payload?: AppServerProtocolMessage }
+  | { status: "stopped"; message: string };
+
+const NON_INTERACTIVE_ANSWER = "Codex Manager 当前是非交互式执行环境，无法在任务过程中等待人工输入。";
+const STDERR_LIMIT = 1200;
 
 export class CodexRunner {
   private activeRuns = new Map<string, ActiveRun>();
-  private stoppedTaskIds = new Set<string>();
 
   constructor(private readonly store: TaskStore) {}
 
@@ -40,6 +51,7 @@ export class CodexRunner {
       this.store.addEvent(taskId, "runner.failed", `工作区准备失败：${message}`);
       throw error;
     }
+
     const workspacePath = prepared.path;
     mkdirSync(workspacePath, { recursive: true });
     this.store.markChecklistDone(
@@ -47,97 +59,44 @@ export class CodexRunner {
       (label) => label.includes("仓库") || label.includes("工作区"),
       prepared.bootstrapped ? `已克隆 ${task.repoUrl}` : `使用工作区 ${workspacePath}`
     );
+
     const prompt = input.prompt?.trim() || buildPrompt(task);
-    const args = [
-      "exec",
-      "--json",
-      "-C",
-      workspacePath,
-      "--model",
-      input.model?.trim() || process.env.CODEX_MANAGER_MODEL || "gpt-5.4",
-      "--sandbox",
-      input.sandbox ?? "workspace-write",
-      "--skip-git-repo-check"
-    ];
-    args.push(prompt);
-
-    this.store.setChecklistRunning(taskId, (label) => label.includes("启动") || label.includes("执行"), "Codex runner 已启动");
-    const startedAt = nowIso();
     const codexBin = process.env.CODEX_MANAGER_CODEX_BIN ?? "codex";
-    const child = spawn(codexBin, args, {
+    const client = new AppServerProtocolClient({
+      codexBin,
       cwd: workspacePath,
-      env: { ...process.env, FORCE_COLOR: "0" }
+      onNotification: (message) => this.handleNotification(taskId, message),
+      onServerRequest: (message) => this.handleServerRequest(taskId, message),
+      onStderr: (line) => this.handleStderr(taskId, line),
+      onExit: (code, signal) => this.handleExit(taskId, code, signal)
     });
-    child.stdin.end();
 
-    this.activeRuns.set(taskId, { child, taskId });
+    const run: ActiveRun = {
+      client,
+      taskId,
+      stopped: false,
+      completed: false
+    };
+    this.activeRuns.set(taskId, run);
+
+    const startedAt = nowIso();
+    this.store.setChecklistRunning(taskId, (label) => label.includes("启动") || label.includes("执行"), "Codex app-server 已启动");
     this.store.updateTask(taskId, {
       status: "running",
       workspacePath,
-      runPid: child.pid ?? null,
+      runPid: client.pid(),
       startedAt,
       finishedAt: null,
-      currentStep: "Codex 正在执行任务"
+      currentStep: "Codex app-server 正在初始化"
     });
-    this.store.addEvent(taskId, "runner.started", "Codex 执行已启动", {
-      pid: child.pid,
+    this.store.addEvent(taskId, "runner.started", "Codex app-server 执行已启动", {
+      pid: client.pid(),
       workspacePath,
-      command: [codexBin, ...args.slice(0, -1), "<prompt>"].join(" ")
+      command: `${codexBin} app-server`
     });
 
-    child.stdout.on("data", (chunk: Buffer) => {
-      this.consumeStdout(taskId, chunk.toString("utf8"));
-    });
-
-    child.stderr.on("data", (chunk: Buffer) => {
-      const message = chunk.toString("utf8").trim();
-      if (message) this.store.addEvent(taskId, "runner.stderr", message);
-    });
-
-    child.on("error", (error) => {
-      this.activeRuns.delete(taskId);
-      this.store.updateTask(taskId, {
-        status: "failed",
-        runPid: null,
-        finishedAt: nowIso(),
-        currentStep: "Codex 启动失败"
-      });
-      this.store.addEvent(taskId, "runner.failed", error.message, { name: error.name, stack: error.stack });
-    });
-
-    child.on("close", (code, signal) => {
-      this.activeRuns.delete(taskId);
-      if (this.stoppedTaskIds.delete(taskId)) {
-        return;
-      }
-      const latest = this.store.getTask(taskId);
-      if (!latest) return;
-      if (code === 0) {
-        this.store.markChecklistDone(taskId, (label) => label.includes("启动") || label.includes("执行"), "Codex 进程退出码 0");
-        this.store.markChecklistDone(taskId, (label) => label.includes("跟踪") || label.includes("日志"), "已采集 Codex JSONL 事件");
-        this.store.markChecklistDone(taskId, (label) => label.includes("整理") || label.includes("证据"), "执行输出已写入事件流");
-        const nextStatus = latest.humanReviewRequired ? "needs_review" : "completed";
-        this.store.updateTask(taskId, {
-          status: nextStatus,
-          runPid: null,
-          finishedAt: nowIso(),
-          currentStep: latest.humanReviewRequired ? "等待人工复核" : "执行完成"
-        });
-        if (latest.humanReviewRequired) {
-          this.store.addEvent(taskId, "review.requested", latest.humanReviewReason || "Codex 执行完成，等待人工复核");
-        }
-        this.store.addEvent(taskId, "runner.finished", "Codex 执行完成", { code, signal });
-      } else {
-        this.store.markChecklistBlocked(taskId, (label) => label.includes("启动") || label.includes("执行"), "Codex 进程非 0 退出");
-        const diagnosis = diagnoseFailure(this.store.listEvents(taskId, 80));
-        this.store.updateTask(taskId, {
-          status: "failed",
-          runPid: null,
-          finishedAt: nowIso(),
-          currentStep: diagnosis || `Codex 执行失败：${signal ?? code ?? "unknown"}`
-        });
-        this.store.addEvent(taskId, "runner.failed", diagnosis || "Codex 执行失败", { code, signal });
-      }
+    void this.runAppServerTurn(taskId, run, workspacePath, prompt, input).catch((error: unknown) => {
+      this.failRun(taskId, error instanceof Error ? error.message : String(error));
     });
 
     return this.store.getTask(taskId)!;
@@ -145,9 +104,13 @@ export class CodexRunner {
 
   stop(taskId: string): Task {
     const run = this.activeRuns.get(taskId);
-    if (!run) throw new Error("任务当前没有运行中的 Codex 进程");
-    run.child.kill("SIGTERM");
-    this.stoppedTaskIds.add(taskId);
+    if (!run) throw new Error("任务当前没有运行中的 Codex app-server");
+    run.stopped = true;
+    run.resolveCompletion?.({ status: "stopped", message: "用户手动停止 Codex 运行" });
+    if (run.threadId && run.turnId) {
+      void run.client.request("turn/interrupt", { threadId: run.threadId, turnId: run.turnId }, 3000).catch(() => undefined);
+    }
+    run.client.shutdown();
     this.activeRuns.delete(taskId);
     this.store.updateTask(taskId, {
       status: "blocked",
@@ -159,38 +122,220 @@ export class CodexRunner {
     return this.store.getTask(taskId)!;
   }
 
-  private consumeStdout(taskId: string, text: string): void {
-    text
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .forEach((line) => {
-        const parsed = parseJsonLine(line);
-        if (!parsed) {
-          this.store.addEvent(taskId, "runner.output", line);
-          return;
-        }
-        this.store.addEvent(taskId, "runner.codex_event", summarizeCodexEvent(parsed), parsed);
-        this.applyCodexEvent(taskId, parsed);
-      });
+  private async runAppServerTurn(
+    taskId: string,
+    run: ActiveRun,
+    workspacePath: string,
+    prompt: string,
+    input: StartTaskInput
+  ): Promise<void> {
+    const model = input.model?.trim() || process.env.CODEX_MANAGER_MODEL || "gpt-5.4";
+    const sandbox = input.sandbox ?? "workspace-write";
+
+    const completion = new Promise<TurnOutcome>((resolve) => {
+      run.resolveCompletion = resolve;
+    });
+
+    const initResult = await run.client.initialize();
+    this.store.addEvent(taskId, "runner.codex_event", "initialize: Codex app-server 已握手", initResult);
+
+    const threadResult = await run.client.request<JsonRecord>("thread/start", {
+      approvalPolicy: "never",
+      cwd: workspacePath,
+      model,
+      sandbox,
+      experimentalRawEvents: true,
+      persistExtendedHistory: true
+    });
+    const threadId = nestedString(threadResult, "thread", "id");
+    if (!threadId) throw new Error("Codex app-server 未返回 thread id");
+    run.threadId = threadId;
+    this.store.updateTask(taskId, {
+      lastCodexThreadId: threadId,
+      lastCodexSessionId: threadId,
+      currentStep: "Codex thread 已创建"
+    });
+    this.store.addEvent(taskId, "runner.codex_event", `thread/start: ${threadId}`, threadResult);
+
+    const turnResult = await run.client.request<JsonRecord>("turn/start", {
+      threadId,
+      input: [{ type: "text", text: prompt, text_elements: [] }],
+      cwd: workspacePath,
+      model,
+      approvalPolicy: "never",
+      sandboxPolicy: sandboxPolicyFor(sandbox, workspacePath)
+    });
+    const turnId = nestedString(turnResult, "turn", "id");
+    if (!turnId) throw new Error("Codex app-server 未返回 turn id");
+    run.turnId = turnId;
+    this.store.updateTask(taskId, {
+      lastCodexTurnId: turnId,
+      lastCodexSessionId: `${threadId}-${turnId}`,
+      currentStep: "Codex turn 正在执行"
+    });
+    this.store.addEvent(taskId, "runner.codex_event", `turn/start: ${turnId}`, turnResult);
+
+    const outcome = await completion;
+    if (outcome.status === "stopped") return;
+    if (outcome.status === "failed") {
+      this.failRun(taskId, outcome.message, outcome.payload);
+      return;
+    }
+    this.completeRun(taskId, outcome.payload);
   }
 
-  private applyCodexEvent(taskId: string, event: Record<string, unknown>): void {
-    const threadId = findString(event, ["thread_id", "threadId", "conversation_id", "conversationId"]);
-    const turnId = findString(event, ["turn_id", "turnId"]);
-    const sessionId = findString(event, ["session_id", "sessionId"]);
-    const update: Partial<Task> = {};
-    if (threadId) update.lastCodexThreadId = threadId;
-    if (turnId) update.lastCodexTurnId = turnId;
-    if (sessionId || threadId || turnId) update.lastCodexSessionId = sessionId ?? [threadId, turnId].filter(Boolean).join("-");
+  private handleNotification(taskId: string, message: AppServerProtocolMessage): void {
+    const method = message.method ?? "notification";
+    this.store.addEvent(taskId, "runner.codex_event", summarizeAppServerMessage(message), message);
 
-    const type = String(event.type ?? nestedString(event, "msg", "type") ?? "");
-    if (type.includes("tool") || type.includes("exec")) {
-      update.currentStep = "Codex 正在调用工具或执行命令";
-    } else if (type.includes("agent") || type.includes("message")) {
-      update.currentStep = "Codex 正在生成或更新答复";
+    const run = this.activeRuns.get(taskId);
+    const params = asRecord(message.params);
+    if (method === "thread/started") {
+      const threadId = nestedString(params, "thread", "id");
+      if (threadId) {
+        if (run) run.threadId = threadId;
+        this.store.updateTask(taskId, { lastCodexThreadId: threadId, lastCodexSessionId: threadId });
+      }
+      return;
     }
-    if (Object.keys(update).length > 0) this.store.updateTask(taskId, update);
+
+    if (method === "turn/started") {
+      const turnId = nestedString(params, "turn", "id");
+      const threadId = findString(params, ["threadId"]);
+      if (run) {
+        if (threadId) run.threadId = threadId;
+        if (turnId) run.turnId = turnId;
+      }
+      this.store.markChecklistDone(taskId, (label) => label.includes("启动") || label.includes("执行"), "Codex turn 已启动");
+      this.store.setChecklistRunning(taskId, (label) => label.includes("跟踪") || label.includes("日志"), "正在采集 app-server 事件流");
+      this.store.updateTask(taskId, {
+        lastCodexThreadId: threadId ?? run?.threadId,
+        lastCodexTurnId: turnId ?? run?.turnId,
+        lastCodexSessionId: [threadId ?? run?.threadId, turnId ?? run?.turnId].filter(Boolean).join("-") || undefined,
+        currentStep: "Codex turn 已开始"
+      });
+      return;
+    }
+
+    if (method === "item/started" || method === "item/completed") {
+      this.store.updateTask(taskId, { currentStep: currentStepFromItem(params, method) });
+      return;
+    }
+
+    if (method.endsWith("/delta") || method === "turn/plan/updated") {
+      this.store.updateTask(taskId, { currentStep: currentStepFromDelta(method) });
+      return;
+    }
+
+    if (method === "error") {
+      const errorMessage = nestedString(params, "error", "message") ?? "Codex turn 发生错误";
+      run?.resolveCompletion?.({ status: "failed", message: errorMessage, payload: message });
+      return;
+    }
+
+    if (method === "turn/completed") {
+      const status = nestedString(params, "turn", "status");
+      if (status === "failed" || status === "interrupted") {
+        run?.resolveCompletion?.({
+          status: "failed",
+          message: nestedString(params, "turn", "error") ?? `Codex turn 状态为 ${status}`,
+          payload: message
+        });
+        return;
+      }
+      run?.resolveCompletion?.({ status: "completed", payload: message });
+    }
+  }
+
+  private handleServerRequest(taskId: string, message: AppServerProtocolMessage): unknown {
+    const method = message.method ?? "server/request";
+    this.store.addEvent(taskId, "runner.codex_event", `server request: ${method}`, message);
+
+    if (method === "item/commandExecution/requestApproval" || method === "item/fileChange/requestApproval") {
+      this.store.updateTask(taskId, { currentStep: "Codex 请求权限，已按本地任务策略自动批准" });
+      return { decision: "acceptForSession" };
+    }
+
+    if (method === "execCommandApproval" || method === "applyPatchApproval") {
+      this.store.updateTask(taskId, { currentStep: "Codex 请求旧版权限，已按本地任务策略自动批准" });
+      return { decision: "approved_for_session" };
+    }
+
+    if (method === "item/permissions/requestApproval") {
+      const params = asRecord(message.params);
+      this.store.updateTask(taskId, { currentStep: "Codex 请求扩展权限，已按本地任务策略批准到本次会话" });
+      return { permissions: params.permissions ?? {}, scope: "session" };
+    }
+
+    if (method === "item/tool/requestUserInput") {
+      const params = asRecord(message.params);
+      this.store.updateTask(taskId, { status: "needs_input", currentStep: "Codex 请求人工输入，已返回非交互式说明" });
+      return { answers: buildNonInteractiveAnswers(params) };
+    }
+
+    if (method === "item/tool/call") {
+      const params = asRecord(message.params);
+      const tool = findString(params, ["tool", "name"]) ?? "unknown";
+      return {
+        success: false,
+        contentItems: [{ type: "inputText", text: `Codex Manager 尚未注册动态工具：${tool}` }]
+      };
+    }
+
+    return {};
+  }
+
+  private handleStderr(taskId: string, line: string): void {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    this.store.addEvent(taskId, "runner.stderr", summarizeStderr(trimmed));
+  }
+
+  private handleExit(taskId: string, code: number | null, signal: NodeJS.Signals | null): void {
+    const run = this.activeRuns.get(taskId);
+    if (!run || run.stopped || run.completed) return;
+    run.resolveCompletion?.({ status: "failed", message: `Codex app-server 异常退出：${signal ?? code ?? "unknown"}` });
+  }
+
+  private completeRun(taskId: string, payload: AppServerProtocolMessage): void {
+    const run = this.activeRuns.get(taskId);
+    if (run) {
+      run.completed = true;
+      run.client.shutdown();
+      this.activeRuns.delete(taskId);
+    }
+    this.store.markChecklistDone(taskId, (label) => label.includes("跟踪") || label.includes("日志"), "已采集 Codex app-server 事件流");
+    this.store.markChecklistDone(taskId, (label) => label.includes("整理") || label.includes("证据"), "执行输出已写入事件流");
+    const latest = this.store.getTask(taskId);
+    if (!latest) return;
+    const nextStatus = latest.humanReviewRequired ? "needs_review" : "completed";
+    this.store.updateTask(taskId, {
+      status: nextStatus,
+      runPid: null,
+      finishedAt: nowIso(),
+      currentStep: latest.humanReviewRequired ? "等待人工复核" : "执行完成"
+    });
+    if (latest.humanReviewRequired) {
+      this.store.addEvent(taskId, "review.requested", latest.humanReviewReason || "Codex 执行完成，等待人工复核");
+    }
+    this.store.addEvent(taskId, "runner.finished", "Codex app-server turn 已完成", payload);
+  }
+
+  private failRun(taskId: string, message: string, payload?: unknown): void {
+    const run = this.activeRuns.get(taskId);
+    if (run) {
+      run.completed = true;
+      run.client.shutdown();
+      this.activeRuns.delete(taskId);
+    }
+    this.store.markChecklistBlocked(taskId, (label) => label.includes("启动") || label.includes("执行"), message);
+    this.store.updateTask(taskId, {
+      status: "failed",
+      runPid: null,
+      finishedAt: nowIso(),
+      currentStep: message
+    });
+    this.store.addEvent(taskId, "runner.failed", message, payload);
   }
 }
 
@@ -214,22 +359,103 @@ function buildPrompt(task: Task): string {
     .join("\n");
 }
 
-function parseJsonLine(line: string): Record<string, unknown> | null {
+function sandboxPolicyFor(sandbox: StartTaskInput["sandbox"], workspacePath: string): JsonRecord {
+  if (sandbox === "danger-full-access") return { type: "dangerFullAccess" };
+  if (sandbox === "read-only") {
+    return {
+      type: "readOnly",
+      access: { type: "fullAccess" },
+      networkAccess: true
+    };
+  }
+  return {
+    type: "workspaceWrite",
+    writableRoots: [workspacePath],
+    readOnlyAccess: { type: "fullAccess" },
+    networkAccess: true,
+    excludeTmpdirEnvVar: false,
+    excludeSlashTmp: false
+  };
+}
+
+function summarizeAppServerMessage(message: AppServerProtocolMessage): string {
+  const method = message.method ?? "response";
+  const params = asRecord(message.params);
+  const delta = findString(params, ["delta"]);
+  if (delta) return `${method}: ${truncate(delta, 240)}`;
+
+  const item = asRecord(params.item);
+  const itemType = findString(item, ["type"]);
+  if (itemType) {
+    const command = findString(item, ["command"]);
+    const tool = findString(item, ["tool"]);
+    return [method, itemType, command ? truncate(command, 180) : tool].filter(Boolean).join(": ");
+  }
+
+  const turnId = nestedString(params, "turn", "id");
+  if (turnId) return `${method}: ${turnId}`;
+  const threadId = nestedString(params, "thread", "id");
+  if (threadId) return `${method}: ${threadId}`;
+  return method;
+}
+
+function currentStepFromItem(params: JsonRecord, method: string): string {
+  const item = asRecord(params.item);
+  const type = findString(item, ["type"]);
+  const done = method === "item/completed";
+  if (type === "commandExecution") return done ? "Codex 命令执行完成" : "Codex 正在执行命令";
+  if (type === "fileChange") return done ? "Codex 文件修改已完成" : "Codex 正在修改文件";
+  if (type === "mcpToolCall" || type === "dynamicToolCall") return done ? "Codex 工具调用完成" : "Codex 正在调用工具";
+  if (type === "agentMessage") return done ? "Codex 答复生成完成" : "Codex 正在生成答复";
+  if (type === "plan") return done ? "Codex 计划更新完成" : "Codex 正在更新计划";
+  return done ? "Codex item 已完成" : "Codex item 正在执行";
+}
+
+function currentStepFromDelta(method: string): string {
+  if (method.includes("commandExecution")) return "Codex 正在输出命令日志";
+  if (method.includes("fileChange")) return "Codex 正在输出文件变更";
+  if (method.includes("plan")) return "Codex 正在更新计划";
+  if (method.includes("reasoning")) return "Codex 正在整理推理摘要";
+  return "Codex 正在流式输出";
+}
+
+function buildNonInteractiveAnswers(params: JsonRecord): JsonRecord {
+  const questions = Array.isArray(params.questions) ? params.questions : [];
+  const answers: JsonRecord = {};
+  for (const question of questions) {
+    const id = question && typeof question === "object" ? (question as JsonRecord).id : null;
+    if (typeof id === "string" && id.trim()) {
+      answers[id] = { answers: [NON_INTERACTIVE_ANSWER] };
+    }
+  }
+  return answers;
+}
+
+function summarizeStderr(line: string): string {
+  const parsed = parseJson(line);
+  if (parsed) {
+    const fields = asRecord(parsed.fields);
+    const message = findString(fields, ["message"]) ?? findString(parsed, ["message"]);
+    const level = findString(parsed, ["level"]);
+    if (message) return truncate([level, message].filter(Boolean).join(": "), STDERR_LIMIT);
+  }
+  return truncate(line, STDERR_LIMIT);
+}
+
+function parseJson(line: string): JsonRecord | null {
   try {
     const parsed = JSON.parse(line) as unknown;
-    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+    return parsed && typeof parsed === "object" ? (parsed as JsonRecord) : null;
   } catch {
     return null;
   }
 }
 
-function summarizeCodexEvent(event: Record<string, unknown>): string {
-  const type = String(event.type ?? nestedString(event, "msg", "type") ?? "codex_event");
-  const text = findString(event, ["message", "text", "summary", "delta"]);
-  return text ? `${type}: ${text.slice(0, 240)}` : type;
+function asRecord(value: unknown): JsonRecord {
+  return value && typeof value === "object" ? (value as JsonRecord) : {};
 }
 
-function findString(record: Record<string, unknown>, keys: string[]): string | null {
+function findString(record: JsonRecord, keys: string[]): string | null {
   for (const key of keys) {
     const value = record[key];
     if (typeof value === "string" && value.trim()) return value.trim();
@@ -237,23 +463,17 @@ function findString(record: Record<string, unknown>, keys: string[]): string | n
   return null;
 }
 
-function nestedString(record: Record<string, unknown>, objectKey: string, valueKey: string): string | null {
-  const nested = record[objectKey];
-  if (!nested || typeof nested !== "object") return null;
-  const value = (nested as Record<string, unknown>)[valueKey];
-  return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
-function diagnoseFailure(events: Array<{ message: string }>): string | null {
-  const joined = events.map((event) => event.message).join("\n");
-  if (joined.includes("requires a newer version of Codex")) {
-    return "模型与当前 Codex CLI 不兼容";
-  }
-  if (joined.includes("UTF-8 encoding error") && joined.includes("x-codex-turn-metadata")) {
-    return "工作区路径包含非 ASCII 字符，Codex websocket metadata 失败";
-  }
-  if (joined.includes("Reading additional input from stdin")) {
-    return "Codex CLI 等待 stdin 输入";
+function nestedString(record: JsonRecord, objectKey: string, valueKey: string): string | null {
+  const nested = asRecord(record[objectKey]);
+  const value = nested[valueKey];
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (value && typeof value === "object") {
+    const message = (value as JsonRecord).message;
+    if (typeof message === "string" && message.trim()) return message.trim();
   }
   return null;
+}
+
+function truncate(value: string, maxLength: number): string {
+  return value.length <= maxLength ? value : `${value.slice(0, maxLength)}...`;
 }
